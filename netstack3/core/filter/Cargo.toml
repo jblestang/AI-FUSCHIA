@@ -1,0 +1,26 @@
+[package]
+name = "netstack3-filter"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "netstack3_filter"
+
+[features]
+testutils = ["instrumented"]
+instrumented = []
+
+[dependencies]
+assert_matches = { workspace = true }
+derivative = { workspace = true, features = ["use_core"] }
+log = { workspace = true }
+net_types = { package = "net-types", path = "../../../libs/net-types" }
+netstack3_base = { package = "netstack3-base", path = "../base" }
+netstack3_hashmap = { package = "netstack3-hashmap", path = "../hashmap" }
+once_cell = { workspace = true }
+packet = { path = "../../../libs/packet" }
+packet_formats = { package = "packet_formats", path = "../../../libs/packet-formats" }
+rand = { workspace = true }
+replace_with = { package = "replace-with", path = "../../../libs/replace-with" }
+zerocopy = { workspace = true, features = ["derive"] }

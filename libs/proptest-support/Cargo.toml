@@ -1,0 +1,10 @@
+[package]
+name = "proptest-support"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+
+[dependencies]
+proptest = "1.6"

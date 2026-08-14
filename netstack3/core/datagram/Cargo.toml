@@ -1,0 +1,28 @@
+[package]
+name = "netstack3-datagram"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "netstack3_datagram"
+
+[features]
+testutils = ["instrumented"]
+instrumented = []
+
+[dependencies]
+assert_matches = { workspace = true }
+derivative = { workspace = true, features = ["use_core"] }
+either = { workspace = true }
+explicit = { path = "../../../libs/explicit" }
+lock_order = { package = "lock-order", path = "../lock-order" }
+net_types = { package = "net-types", path = "../../../libs/net-types" }
+netstack3_base = { package = "netstack3-base", path = "../base" }
+netstack3_filter = { package = "netstack3-filter", path = "../filter" }
+netstack3_hashmap = { package = "netstack3-hashmap", path = "../hashmap" }
+netstack3_ip = { package = "netstack3-ip", path = "../ip" }
+packet = { path = "../../../libs/packet" }
+packet_formats = { package = "packet_formats", path = "../../../libs/packet-formats" }
+ref-cast = { workspace = true }
+thiserror = { workspace = true }

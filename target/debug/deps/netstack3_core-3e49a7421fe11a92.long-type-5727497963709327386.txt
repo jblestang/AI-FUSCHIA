@@ -1,0 +1,1 @@
+locked::Locked<&'a StackState<BC>, lock_ordering::UdpSocketState<I>>: BoundStateContext<I, BC>

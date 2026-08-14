@@ -1,0 +1,8 @@
+[package]
+name = "lock-order"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "lock_order"

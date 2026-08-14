@@ -1,0 +1,19 @@
+[package]
+name = "packet_formats"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+
+[dependencies]
+byteorder = { workspace = true }
+derivative = { workspace = true, features = ["use_core"] }
+either = { workspace = true }
+explicit = { path = "../explicit" }
+internet_checksum = { path = "../internet-checksum" }
+log = { workspace = true }
+net_types = { package = "net-types", path = "../net-types" }
+packet = { path = "../packet" }
+thiserror = { workspace = true }
+zerocopy = { workspace = true, features = ["derive"] }
