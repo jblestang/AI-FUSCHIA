@@ -1,0 +1,38 @@
+[package]
+name = "netstack3-tcp"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "netstack3_tcp"
+
+[features]
+testutils = ["instrumented"]
+instrumented = []
+
+[dependencies]
+arrayvec = { workspace = true }
+assert_matches = { workspace = true }
+cfg-if = { workspace = true }
+derivative = { workspace = true, features = ["use_core"] }
+explicit = { path = "../../../libs/explicit" }
+lock_order = { package = "lock-order", path = "../lock-order" }
+log = { workspace = true }
+net_types = { package = "net-types", path = "../../../libs/net-types" }
+netstack3_base = { package = "netstack3-base", path = "../base" }
+netstack3_filter = { package = "netstack3-filter", path = "../filter" }
+netstack3_hashmap = { package = "netstack3-hashmap", path = "../hashmap" }
+netstack3_ip = { package = "netstack3-ip", path = "../ip" }
+netstack3_trace = { package = "netstack3-trace", path = "../trace" }
+packet = { path = "../../../libs/packet" }
+packet_formats = { package = "packet_formats", path = "../../../libs/packet-formats" }
+rand = { workspace = true }
+replace_with = { package = "replace-with", path = "../../../libs/replace-with" }
+siphasher = { workspace = true }
+smallvec = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+either = { workspace = true }
+netstack3_macros = { package = "netstack3-macros", path = "../macros" }

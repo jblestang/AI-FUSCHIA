@@ -1,0 +1,21 @@
+[package]
+name = "netstack3-sync"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "netstack3_sync"
+
+[features]
+instrumented = ["recursive-lock-panic", "rc-debug-names"]
+recursive-lock-panic = []
+rc-debug-names = []
+testutils = ["instrumented"]
+loom = ["rc-debug-names", "testutils", "dep:loom"]
+
+[dependencies]
+derivative = { workspace = true, features = ["use_core"] }
+lock_order = { package = "lock-order", path = "../lock-order" }
+loom = { version = "0.7", optional = true }
+net_types = { package = "net-types", path = "../../../libs/net-types" }

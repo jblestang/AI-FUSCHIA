@@ -1,0 +1,10 @@
+[package]
+name = "diagnostics-traits"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+
+[dependencies]
+net_types = { package = "net-types", path = "../net-types" }

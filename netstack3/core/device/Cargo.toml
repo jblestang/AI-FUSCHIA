@@ -1,0 +1,26 @@
+[package]
+name = "netstack3-device"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "netstack3_device"
+
+[features]
+testutils = ["instrumented"]
+instrumented = []
+
+[dependencies]
+derivative = { workspace = true, features = ["use_core"] }
+lock_order = { package = "lock-order", path = "../lock-order" }
+log = { workspace = true }
+net_types = { package = "net-types", path = "../../../libs/net-types" }
+netstack3_base = { package = "netstack3-base", path = "../base" }
+netstack3_filter = { package = "netstack3-filter", path = "../filter" }
+netstack3_hashmap = { package = "netstack3-hashmap", path = "../hashmap" }
+netstack3_ip = { package = "netstack3-ip", path = "../ip" }
+netstack3_trace = { package = "netstack3-trace", path = "../trace" }
+packet = { path = "../../../libs/packet" }
+packet_formats = { package = "packet_formats", path = "../../../libs/packet-formats" }
+ref-cast = { workspace = true }

@@ -1,0 +1,15 @@
+[package]
+name = "net-types"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+net_types_macros = { package = "net-types-macros", path = "../net-types-macros" }
+zerocopy = { workspace = true, features = ["derive"] }

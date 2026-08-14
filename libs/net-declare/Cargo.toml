@@ -1,0 +1,14 @@
+[package]
+name = "net-declare"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+
+[dependencies]
+fidl_fuchsia_net_common = { package = "fidl-fuchsia-net-common", path = "../fidl-fuchsia-net-common" }
+net_declare_macros = { package = "net-declare-macros", path = "../net-declare-macros" }
+
+[dev-dependencies]
+net_types = { package = "net-types", path = "../net-types" }

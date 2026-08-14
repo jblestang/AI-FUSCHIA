@@ -1,0 +1,1 @@
+UdpBindingsContext<I, <locked::Locked<&StackState<BC>, L> as DeviceIdContext<netstack3_base::AnyDevice>>::DeviceId>

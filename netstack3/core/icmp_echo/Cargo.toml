@@ -1,0 +1,24 @@
+[package]
+name = "netstack3-icmp-echo"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "netstack3_icmp_echo"
+
+[features]
+testutils = ["instrumented"]
+instrumented = []
+
+[dependencies]
+derivative = { workspace = true, features = ["use_core"] }
+either = { workspace = true }
+lock_order = { package = "lock-order", path = "../lock-order" }
+log = { workspace = true }
+net_types = { package = "net-types", path = "../../../libs/net-types" }
+netstack3_base = { package = "netstack3-base", path = "../base" }
+netstack3_datagram = { package = "netstack3-datagram", path = "../datagram" }
+netstack3_ip = { package = "netstack3-ip", path = "../ip" }
+packet = { path = "../../../libs/packet" }
+packet_formats = { package = "packet_formats", path = "../../../libs/packet-formats" }

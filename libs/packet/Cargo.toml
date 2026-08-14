@@ -1,0 +1,17 @@
+[package]
+name = "packet"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+
+[dependencies]
+arrayvec = { workspace = true }
+replace_with = { package = "replace-with", path = "../replace-with" }
+zerocopy = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+assert_matches = { workspace = true }
+test_util = { path = "../test_util" }
+test-case = "3.3"

@@ -1,0 +1,8 @@
+[package]
+name = "replace-with"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "replace_with"
