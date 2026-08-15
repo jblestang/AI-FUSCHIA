@@ -1,0 +1,23 @@
+[package]
+name = "gpu-auth-filter"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "High-throughput batch filtering by comparing data against authorized bitmasks (CPU SIMD + optional GPU compute)"
+
+[features]
+default = []
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
+[dependencies]
+bytemuck = { version = "1.22", features = ["derive"], optional = true }
+pollster = { version = "0.4", optional = true }
+wgpu = { version = "24", optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true, features = ["html_reports"] }
+rand = { workspace = true }
+
+[[bench]]
+name = "batch_authorize"
+harness = false
