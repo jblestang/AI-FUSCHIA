@@ -1224,7 +1224,7 @@ impl<I: Ip> UdpRecvDatagram<I> {
         let transport = unsafe {
             core::slice::from_raw_parts(body.as_ptr().sub(header_len), header_len + parse_meta.body_len())
         };
-        shared_packet_view_for_transport(None, transport, parse_meta)
+        shared_packet_view_for_transport(None, transport, parse_meta, None)
     }
 
     /// Returns a refcount-only clone suitable for fan-out delivery.

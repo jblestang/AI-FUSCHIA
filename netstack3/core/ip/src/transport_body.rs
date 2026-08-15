@@ -70,6 +70,7 @@ pub fn shared_packet_view_for_transport(
     frame_storage: Option<&Arc<[u8]>>,
     transport_buffer: &[u8],
     parse_meta: ParseMetadata,
+    ip_fragment_chain: Option<Arc<[crate::internal::fragment_chain::PacketSegment]>>,
 ) -> SharedPacketView {
     match frame_storage {
         Some(frame) => {
@@ -78,22 +79,28 @@ pub fn shared_packet_view_for_transport(
                 Arc::clone(frame),
                 transport_start,
                 parse_meta,
-                None,
+                ip_fragment_chain,
             )
         }
         None => {
             let storage: Arc<[u8]> = Arc::from(transport_buffer);
             let layers = layer_ranges_in_frame(storage.len(), 0, parse_meta);
-            SharedPacketView::contiguous(storage, layers)
+            SharedPacketView::contiguous_with_ip_fragments(storage, layers, ip_fragment_chain)
         }
     }
 }
 
 /// Builds a [`SharedPacketView`] for a parsed transport packet within pinned RX storage.
 pub fn transport_packet_view(
-    frame_storage: &Option<Arc<[u8]>>,
+    frame_storage: Option<Arc<[u8]>>,
     transport_before_parse: &[u8],
     parse_meta: ParseMetadata,
+    ip_fragment_chain: Option<Arc<[crate::internal::fragment_chain::PacketSegment]>>,
 ) -> SharedPacketView {
-    shared_packet_view_for_transport(frame_storage.as_ref(), transport_before_parse, parse_meta)
+    shared_packet_view_for_transport(
+        frame_storage.as_ref(),
+        transport_before_parse,
+        parse_meta,
+        ip_fragment_chain,
+    )
 }

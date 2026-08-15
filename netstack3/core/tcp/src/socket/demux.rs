@@ -143,7 +143,8 @@ where
         info: &mut LocalDeliveryPacketInfo<I, H>,
         early_demux_socket: Option<Self::EarlyDemuxSocket>,
     ) -> Result<(), (B, I::IcmpError)> {
-        let LocalDeliveryPacketInfo { meta, header_info, marks, frame_storage, ip_fragment_chain: _ } = info;
+        let LocalDeliveryPacketInfo { meta, header_info, marks, frame_storage, ip_fragment_chain } =
+            info;
         let ReceiveIpPacketMeta {
             broadcast,
             transparent_override,
@@ -264,7 +265,8 @@ where
                 dscp_and_ecn: header_info.dscp_and_ecn(),
             },
             header_info,
-            &frame_storage,
+            frame_storage.take(),
+            ip_fragment_chain.take(),
             transport_slice,
             parse_meta,
             &incoming_segment,

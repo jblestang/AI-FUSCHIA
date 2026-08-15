@@ -7,8 +7,9 @@
 //! # Processing delivered segments (L3 → L4 → L7)
 //!
 //! Bindings receive a [`TcpRecvSegment`] with a wire [`SharedPacketView`] plus
-//! [`TcpSegmentReceiveMeta`]. Overlap/window trimming stays inside the TCP state
-//! machine; metadata exposes sequence offsets so L7 can detect overlap.
+//! [`TcpSegmentReceiveMeta`]. When IP reassembly occurred, [`TcpRecvSegment::ip_fragment_chain`]
+//! exposes the original wire IP fragments (same as UDP). Overlap/window trimming stays inside
+//! the TCP state machine; metadata exposes sequence offsets so L7 can detect overlap.
 //!
 //! ```no_run
 //! use net_types::ip::Ipv4;
@@ -44,7 +45,10 @@ use core::num::NonZeroU16;
 
 use net_types::ip::{GenericOverIp, Ip};
 use netstack3_base::{Payload, Segment, SeqNum, WindowSize};
-use netstack3_ip::{IpReceiveMeta, SharedPacketView, transport_packet_view};
+use netstack3_ip::{
+    IpReceiveMeta, PacketSegment, SharedPacketView, shared_packet_view_at_transport_start,
+    shared_packet_view_for_transport, transport_packet_view, transport_start_in_frame,
+};
 use packet::{FragmentedBytes, ParseMetadata};
 use packet_formats::ip::DscpAndEcn;
 
@@ -178,6 +182,21 @@ impl<I: Ip> TcpRecvSegment<I> {
         self
     }
 
+    /// Wire IP fragments when the datagram was reassembled before TCP parse.
+    pub fn ip_fragment_chain(&self) -> Option<&[PacketSegment]> {
+        self.view.ip_fragment_chain()
+    }
+
+    /// Raw IPv4 TOS byte per wire IP fragment (when [`Self::ip_fragment_chain`] is present).
+    pub fn ipv4_fragment_tos_raw(&self) -> impl Iterator<Item = u8> + '_ {
+        self.view.ipv4_fragment_tos_raw()
+    }
+
+    /// True when the segment arrived via multi-fragment IP reassembly.
+    pub fn is_reassembled_from_ip_fragments(&self) -> bool {
+        self.view.is_reassembled_from_fragments()
+    }
+
     /// Invokes `f` with the full TCP segment bytes (header + payload) as received on the wire.
     pub fn with_transport<R, F>(&self, f: F) -> R
     where
@@ -236,16 +255,38 @@ impl<I: Ip> TcpRecvSegment<I> {
 pub fn build_tcp_recv_segment<I: Ip, H: netstack3_ip::IpHeaderInfo<I>>(
     meta: TcpPacketMeta<I>,
     header_info: &H,
-    frame_storage: &Option<Arc<[u8]>>,
+    frame_storage: Option<Arc<[u8]>>,
+    ip_fragment_chain: Option<Arc<[PacketSegment]>>,
     transport_slice: &[u8],
     parse_meta: ParseMetadata,
     tcp: TcpSegmentReceiveMeta,
 ) -> TcpRecvSegment<I> {
+    let header_len = parse_meta.header_len();
+    let body_end = header_len.saturating_add(parse_meta.body_len());
+    let body = transport_slice.get(header_len..body_end).unwrap_or(&[]);
+
+    let view = match frame_storage {
+        Some(frame) => match transport_start_in_frame(&frame, body, parse_meta) {
+            Some(start) => shared_packet_view_at_transport_start(
+                frame,
+                start,
+                parse_meta,
+                ip_fragment_chain,
+            ),
+            None => shared_packet_view_for_transport(
+                Some(&frame),
+                transport_slice,
+                parse_meta,
+                ip_fragment_chain,
+            ),
+        },
+        None => transport_packet_view(None, transport_slice, parse_meta, ip_fragment_chain),
+    };
     TcpRecvSegment {
         meta,
         ip_meta: IpReceiveMeta::from_header(header_info),
         tcp,
-        view: transport_packet_view(frame_storage, transport_slice, parse_meta),
+        view,
     }
 }
 
@@ -253,7 +294,8 @@ pub fn build_tcp_recv_segment<I: Ip, H: netstack3_ip::IpHeaderInfo<I>>(
 pub fn build_wire_tcp_recv_segment<I: Ip, H: netstack3_ip::IpHeaderInfo<I>>(
     meta: TcpPacketMeta<I>,
     header_info: &H,
-    frame_storage: &Option<Arc<[u8]>>,
+    frame_storage: Option<Arc<[u8]>>,
+    ip_fragment_chain: Option<Arc<[PacketSegment]>>,
     transport_slice: &[u8],
     parse_meta: ParseMetadata,
     segment: &Segment<impl Payload>,
@@ -262,6 +304,7 @@ pub fn build_wire_tcp_recv_segment<I: Ip, H: netstack3_ip::IpHeaderInfo<I>>(
         meta,
         header_info,
         frame_storage,
+        ip_fragment_chain,
         transport_slice,
         parse_meta,
         TcpSegmentReceiveMeta::from_segment_wire(segment),
@@ -326,7 +369,8 @@ mod process_example {
                 dscp_and_ecn: header_info.dscp_and_ecn(),
             },
             &header_info,
-            &Some(frame),
+            Some(frame),
+            None,
             transport_slice,
             parse_meta,
             &incoming,

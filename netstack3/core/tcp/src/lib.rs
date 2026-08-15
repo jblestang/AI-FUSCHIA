@@ -44,6 +44,7 @@ pub use internal::buffer::{Buffer, BufferLimits, IntoBuffers, ReceiveBuffer, Sen
 pub use internal::counters::{
     CombinedTcpCounters, TcpCountersWithSocket, TcpCountersWithoutSocket,
 };
+pub use netstack3_ip::PacketSegment;
 pub use internal::receive_segment::{
     TcpPacketMeta, TcpRecvSegment, TcpSegmentReceiveMeta, build_tcp_recv_segment,
     build_wire_tcp_recv_segment,
