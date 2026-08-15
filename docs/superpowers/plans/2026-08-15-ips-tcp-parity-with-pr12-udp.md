@@ -18,7 +18,7 @@
 - IPS bypasses sockets/filtering/routing — deliver via new `receive_tcp_segment` binding, not `TcpApi`.
 - No TCP stream reassembly at IPS layer — one IP datagram (possibly IP-reassembled) = one `ReceivedTcpSegmentView`.
 - L7 agents may **keep a prefix** of the original payload and **drop the rest** (incomplete application data); the overwriter must apply partial edits, not only full-payload replacement.
-- Per-flow **sequence/ACK adjustment** is required in **both directions** when bytes are removed or injected (classic inline-IPS / TCP-NAT mangling semantics).
+- Per-flow **sequence/ACK adjustment** is required in **both directions** when bytes are removed (classic inline-IPS / TCP-NAT mangling semantics). **No byte injection** — the overwriter only keeps an original prefix and drops the rest.
 
 ---
 
@@ -316,11 +316,11 @@ git commit -am "feat(ips): zero-copy TCP segment ingress with RFC 5722 reassembl
 - Produces:
   - `TcpFlowKey { src_ip, src_port, dst_ip, dst_port }`
   - `TcpFlowDirection` — `ClientToServer` | `ServerToClient` (derived from key orientation)
-  - `TcpFlowState { delta_c2s: u32, delta_s2c: u32 }` — bytes **removed** from each direction (add bytes removed, subtract if injecting)
+  - `TcpFlowState { delta_c2s: u32, delta_s2c: u32 }` — cumulative bytes **removed** from each direction
   - `IpsTcpFlowTable` — `HashMap<TcpFlowKey, TcpFlowState>` with eviction policy (LRU, default cap 64k flows)
   - `fn flow_direction(key: &TcpFlowKey, segment: &TcpHeaderView) -> TcpFlowDirection`
   - `fn adjust_seq_ack(state: &TcpFlowState, dir: TcpFlowDirection, raw_seq: u32, raw_ack: Option<u32>) -> (u32, Option<u32>)`
-  - `fn record_payload_edit(state: &mut TcpFlowState, dir: TcpFlowDirection, removed: u32, injected: u32)`
+  - `fn record_bytes_removed(state: &mut TcpFlowState, dir: TcpFlowDirection, removed: u32)`
 
 **Adjustment rules** (bytes removed from C→S stream; symmetric for S→C):
 
@@ -339,7 +339,7 @@ After editing payload on C→S: `delta_c2s += (original_payload_len - forwarded_
 fn seq_and_ack_adjust_after_bytes_removed_from_c2s() {
     let mut state = TcpFlowState::default();
     // C→S segment seq=1000, remove 20 payload bytes → delta_c2s=20
-    record_payload_edit(&mut state, TcpFlowDirection::ClientToServer, 20, 0);
+    record_bytes_removed(&mut state, TcpFlowDirection::ClientToServer, 20);
     // Next C→S segment raw seq=1100 → adjusted 1080
     assert_eq!(adjust_seq_ack(&state, TcpFlowDirection::ClientToServer, 1100, None).0, 1080);
     // S→C segment raw ack=1100 → adjusted 1080
@@ -375,27 +375,24 @@ git commit -am "feat(ips): add per-flow TCP seq/ack delta tracking"
 
 **Interfaces:**
 - Produces:
-  - `TcpPayloadEdit { keep_from_original: Range<usize>, inject_after_keep: &' [u8] }` — keep `[start..end)` of reassembled payload; optionally append injected bytes; **drop everything after `end`**
-  - `TcpOverwriteChecksum`, `TcpOverwriteError` (+ `InvalidKeepRange`, `SeqAckOverflow`)
+  - `TcpPayloadEdit { keep_len: usize }` — keep the first `keep_len` bytes of the reassembled payload unchanged; **drop the tail** (no injection, no middle-range edits)
+  - `TcpOverwriteChecksum`, `TcpOverwriteError` (+ `KeepLenExceedsPayload`, `SeqAckOverflow`)
   - `TcpOverwriter<'a, 'flow>` with `flow: &'flow mut TcpFlowState`, `direction: TcpFlowDirection`
 
 **L7 agent contract:**
 
 ```rust
 // Agent validated first 40 bytes of an 80-byte segment; drop incomplete tail.
-overwriter.apply_edit(TcpPayloadEdit {
-    keep_from_original: 0..40,
-    inject_after_keep: &[],  // or sanitized replacement prefix
-})?;
-// Overwriter: copies keep range in-place, truncates payload, updates delta,
-// patches seq/ack on THIS segment, IPv4 total len, checksums, consolidates fragments.
+overwriter.apply_edit(TcpPayloadEdit { keep_len: 40 })?;
+// Overwriter: truncates payload to 40 bytes in-place (bytes [0..40) untouched),
+// updates delta, patches seq/ack, IPv4 total len, checksums, consolidates fragments.
 ```
 
 **Wire patching** (beyond UDP):
 
 | Field | When |
 |-------|------|
-| TCP payload | Copy `keep` range; truncate to `keep.len() + inject.len()` |
+| TCP payload | Truncate to `keep_len` (prefix bytes unchanged; no copy, no new bytes) |
 | TCP SEQ | `raw_seq - delta_this_dir` (before edit; edit then increments delta) |
 | TCP ACK | `raw_ack - delta_reverse_dir` if ACK flag set |
 | IPv4 total length | `ip_hdr + tcp_hdr + new_payload_len` |
@@ -423,9 +420,8 @@ fn reverse_direction_ack_adjusted_after_c2s_edit() {
 }
 
 #[test]
-fn keep_range_with_inject_prefix() {
-    // keep 10..50, inject [0xDE, 0xAD] before kept bytes → payload len 2+40
-    // delta accounts for (80 - 42) removed
+fn keep_len_zero_drops_entire_payload() {
+    // 80-byte payload; keep_len=0 → empty payload, delta += 80
 }
 
 #[test]
@@ -617,7 +613,7 @@ PR title: **IPS zero-copy TCP receive path with TcpOverwriter (parity with PR #1
 | Concern | UDP (PR12) | TCP (this plan) |
 |---------|------------|-----------------|
 | L7 delivery type | `ReceivedUdpDatagramView` | `ReceivedTcpSegmentView` |
-| L7 edit model | Full payload replace / same-len patch | **Partial keep + drop tail** (+ optional inject) |
+| L7 edit model | Full payload replace / same-len patch | **Keep original prefix, drop tail** (no injection) |
 | Header parsing | Fixed 8 bytes | Variable via TCP data offset |
 | Length field update | UDP length + IPv4 total | IPv4 total only |
 | Checksum | UDP + IPv4 header | TCP + IPv4 header (pseudo-header) |
@@ -655,8 +651,8 @@ sequenceDiagram
 - **TCP options beyond 20 bytes:** v1 overwrite preserves existing options bytes; does not add/remove options.
 - **IPv6 TCP overwrite:** receive only; overwriter returns `UnsupportedIpVersion`.
 - **SYN/FIN/RST-only segments:** zero-payload segments valid; `apply_edit` with empty keep on payload-only segments; SYN/FIN seq consumption tracked separately from payload delta.
+- **Prefix-only keep:** v1 supports `keep_len` (first N bytes) only — no injection, no dropping a malicious prefix while keeping a suffix. Middle-range edits would require relocating bytes and are out of scope.
 - **Cross-segment incomplete messages:** IPS does not buffer partial app messages across segments — L7 keeps what is valid **within the current segment** only. Multi-segment app reassembly is the agent's responsibility upstream of `apply_edit`.
-- **Flow table exhaustion:** evict LRU flows; evicted flow → `TcpOverwriteError::UnknownFlow` unless recreated (agent must pass-through unmodified or re-sync).
 - **Simultaneous open / reset:** RST segments use `adjust_headers_only`; RST payload edits rejected.
 
 ## Self-Review
