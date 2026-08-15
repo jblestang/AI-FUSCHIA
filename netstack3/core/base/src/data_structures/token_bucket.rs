@@ -344,7 +344,7 @@ pub(crate) mod tests {
     }
 }
 
-#[cfg(any(test, feature = "benchmark"))]
+#[cfg(test)]
 pub(crate) mod benchmarks {
     use super::*;
 
@@ -377,18 +377,4 @@ pub(crate) mod benchmarks {
     bench!(bench_try_take_almost_equal_rate, |b| bench_try_take(b, 64, 65));
     // Call `try_take` at 2x the enforced rate.
     bench!(bench_try_take_double_rate, |b| bench_try_take(b, 64, 64 * 2));
-
-    #[cfg(feature = "benchmark")]
-    pub fn add_benches(
-        group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    ) {
-        let _ = group.bench_function("TokenBucket/TryTake/Slow", bench_try_take_slow);
-        let _ = group.bench_function("TokenBucket/TryTake/HalfRate", bench_try_take_half_rate);
-        let _ = group.bench_function("TokenBucket/TryTake/EqualRate", bench_try_take_equal_rate);
-        let _ = group.bench_function(
-            "TokenBucket/TryTake/AlmostEqualRate",
-            bench_try_take_almost_equal_rate,
-        );
-        let _ = group.bench_function("TokenBucket/TryTake/DoubleRate", bench_try_take_double_rate);
-    }
 }

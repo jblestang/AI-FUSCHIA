@@ -209,7 +209,7 @@ impl<BT: TxMetadataBindingsTypes> DeviceIpLayerMetadata<BT> {
         self.tx_metadata
     }
     /// Creates new IP layer metadata with the marks.
-    #[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+    #[cfg(any(test, feature = "testutils"))]
     pub fn with_marks(marks: Marks) -> Self {
         Self { conntrack_entry: None, tx_metadata: Default::default(), marks }
     }
@@ -1858,7 +1858,7 @@ pub struct Ipv4StateBuilder {
 
 impl Ipv4StateBuilder {
     /// Get the builder for the ICMPv4 state.
-    #[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+    #[cfg(any(test, feature = "testutils"))]
     pub fn icmpv4_builder(&mut self) -> &mut Icmpv4StateBuilder {
         &mut self.icmp
     }
@@ -1931,10 +1931,10 @@ impl Ipv6StateBuilder {
 
 impl Default for Ipv6StateBuilder {
     fn default() -> Self {
-        #[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+        #[cfg(any(test, feature = "testutils"))]
         let slaac_stable_secret_key = Some(IidSecret::ALL_ONES);
 
-        #[cfg(not(any(test, feature = "testutils", feature = "benchmark")))]
+        #[cfg(not(any(test, feature = "testutils")))]
         let slaac_stable_secret_key = None;
 
         Self { icmp: Icmpv6StateBuilder::default(), slaac_stable_secret_key }
@@ -2139,7 +2139,7 @@ impl<I: Ip, D, BT: IpRoutingBindingsTypes> RoutingTableId<I, D, BT> {
     }
 
     /// Provides direct access to the forwarding table.
-    #[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+    #[cfg(any(test, feature = "testutils"))]
     pub fn table(&self) -> &RwLock<RoutingTable<I, D>> {
         let Self(inner) = self;
         &inner.routing_table
@@ -2232,13 +2232,13 @@ impl<I: IpLayerIpExt, D: StrongDeviceIdentifier, BT: IpStateBindingsTypes> IpSta
     }
 
     /// Provides direct access to the path MTU cache.
-    #[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+    #[cfg(any(test, feature = "testutils"))]
     pub fn pmtu_cache(&self) -> &Mutex<PmtuCache<I, BT>> {
         &self.pmtu_cache
     }
 
     /// Provides direct access to the filtering state.
-    #[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+    #[cfg(any(test, feature = "testutils"))]
     pub fn filter(&self) -> &RwLock<filter::State<I, WeakAddressId<I, BT>, BT>> {
         &self.filter
     }
@@ -5031,7 +5031,7 @@ pub trait FilterHandlerProvider<I: FilterIpExt, BT: FilterBindingsTypes>:
     fn filter_handler(&mut self) -> Self::Handler<'_>;
 }
 
-#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+#[cfg(any(test, feature = "testutils"))]
 pub(crate) mod testutil {
     use super::*;
 

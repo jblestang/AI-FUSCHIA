@@ -357,7 +357,7 @@ where
     }
 
     /// Gets all table IDs.
-    #[cfg(any(feature = "testutils", feature = "benchmark"))]
+    #[cfg(any(feature = "testutils"))]
     pub fn list_table_ids(&mut self) -> Vec<RoutesApiTableId<I, C>> {
         self.core_ctx().with_ip_routing_tables(|_ctx, tables| tables.keys().cloned().collect())
     }
@@ -387,7 +387,7 @@ where
         RoutesApi::new(pair)
     }
 
-    #[cfg(any(feature = "testutils", feature = "benchmark"))]
+    #[cfg(any(feature = "testutils"))]
     /// Gets all the installed routes.
     pub fn get_all_routes_in_main_table(
         &mut self,

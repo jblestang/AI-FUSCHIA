@@ -210,7 +210,7 @@ impl EitherIpProto {
 
 /// Information about a socket passed to a socket operations filter.
 #[derive(Clone, Debug)]
-#[cfg_attr(any(test, feature = "testutils", feature = "benchmark"), derive(PartialEq, Eq))]
+#[cfg_attr(any(test, feature = "testutils"), derive(PartialEq, Eq))]
 pub struct SocketInfo {
     /// The IP-version-specific transport protocol.
     pub proto: EitherIpProto,

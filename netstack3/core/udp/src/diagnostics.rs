@@ -25,7 +25,7 @@ use crate::internal::base::{Udp, UdpBindingsTypes, UdpSocketId, UdpSocketState};
 // The reason this isn't on the datagram API is that we don't have plans to
 // support other datagram socket types at this time.
 #[derive(Debug)]
-#[cfg_attr(any(test, feature = "testutils", feature = "benchmark"), derive(PartialEq, Eq))]
+#[cfg_attr(any(test, feature = "testutils"), derive(PartialEq, Eq))]
 #[allow(missing_docs)]
 pub struct UdpSocketDiagnostics<I: Ip> {
     pub state: UdpSocketDiagnosticTuple<I>,
@@ -73,7 +73,7 @@ where
 
 /// UDP socket tuple information for diagnostics.
 #[derive(Debug)]
-#[cfg_attr(any(test, feature = "testutils", feature = "benchmark"), derive(PartialEq, Eq))]
+#[cfg_attr(any(test, feature = "testutils"), derive(PartialEq, Eq))]
 #[allow(missing_docs)]
 pub enum UdpSocketDiagnosticTuple<I: Ip> {
     Bound { src_addr: Option<I::Addr>, src_port: NonZeroU16 },

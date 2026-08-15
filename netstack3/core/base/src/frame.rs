@@ -342,7 +342,7 @@ impl AsMut<[u8]> for NeverBuffer {
     }
 }
 
-#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+#[cfg(any(test, feature = "testutils"))]
 pub(crate) mod testutil {
     use super::*;
     use alloc::boxed::Box;

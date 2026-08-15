@@ -40,7 +40,7 @@ impl<L> SendBufferTracking<L> {
     }
 
     /// Calls the callback `f` with a mutable reference to the listener.
-    #[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+    #[cfg(any(test, feature = "testutils"))]
     pub fn with_listener<R, F: FnOnce(&mut L) -> R>(&self, f: F) -> R {
         f(&mut self.inner.lock().listener)
     }
@@ -210,7 +210,7 @@ pub trait SocketWritableListener {
     fn on_writable_changed(&mut self, writable: bool);
 }
 
-#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+#[cfg(any(test, feature = "testutils"))]
 pub(crate) mod testutil {
     use super::*;
 

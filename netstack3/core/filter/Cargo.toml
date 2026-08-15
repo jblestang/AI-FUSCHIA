@@ -8,9 +8,8 @@ license.workspace = true
 name = "netstack3_filter"
 
 [features]
-testutils = ["instrumented", "benchmark"]
+testutils = ["instrumented"]
 instrumented = []
-benchmark = []
 
 [dependencies]
 assert_matches = { workspace = true }

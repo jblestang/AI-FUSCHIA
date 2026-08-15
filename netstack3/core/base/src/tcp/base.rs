@@ -406,7 +406,7 @@ impl<'a, const N: usize> InnerPacketBuilder for FragmentedPayload<'a, N> {
     }
 }
 
-#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+#[cfg(any(test, feature = "testutils"))]
 mod testutil {
     use super::*;
 

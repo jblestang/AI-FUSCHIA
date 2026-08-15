@@ -14,7 +14,7 @@ pub trait EventContext<T> {
     fn on_event(&mut self, event: T);
 }
 
-#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+#[cfg(any(test, feature = "testutils"))]
 pub(crate) mod testutil {
     use super::*;
 

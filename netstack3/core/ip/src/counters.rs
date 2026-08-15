@@ -34,7 +34,7 @@ impl IpCountersIpExt for Ipv6 {
 #[derive(Default, Debug, GenericOverIp)]
 #[generic_over_ip(I, Ip)]
 #[cfg_attr(
-    any(test, feature = "testutils", feature = "benchmark"),
+    any(test, feature = "testutils"),
     derive(PartialEq, netstack3_macros::CounterCollection)
 )]
 pub struct IpCounters<I: IpCountersIpExt, C: CounterRepr = Counter> {
@@ -207,7 +207,7 @@ impl<I: IpCountersIpExt> Inspectable for IpCounters<I> {
 
 /// IPv4-specific Rx counters.
 #[derive(Default, Debug, netstack3_macros::CounterCollection)]
-#[cfg_attr(any(test, feature = "testutils", feature = "benchmark"), derive(PartialEq,))]
+#[cfg_attr(any(test, feature = "testutils"), derive(PartialEq,))]
 pub struct Ipv4RxCounters<C = Counter> {
     /// Count of incoming broadcast IPv4 packets delivered.
     pub deliver_broadcast: C,
@@ -222,7 +222,7 @@ impl<C: CounterRepr> Inspectable for Ipv4RxCounters<C> {
 
 /// IPv6-specific Rx counters.
 #[derive(Default, Debug, netstack3_macros::CounterCollection)]
-#[cfg_attr(any(test, feature = "testutils", feature = "benchmark"), derive(PartialEq,))]
+#[cfg_attr(any(test, feature = "testutils"), derive(PartialEq,))]
 pub struct Ipv6RxCounters<C = Counter> {
     /// Count of incoming IPv6 packets discarded while processing extension
     /// headers.
@@ -240,7 +240,7 @@ impl<C: CounterRepr> Inspectable for Ipv6RxCounters<C> {
     }
 }
 
-#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+#[cfg(any(test, feature = "testutils"))]
 pub mod testutil {
     use super::*;
 

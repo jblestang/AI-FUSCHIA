@@ -69,7 +69,7 @@ impl<T: Copy> BufferSizeSettings<T> {
     }
 }
 
-#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+#[cfg(any(test, feature = "testutils"))]
 pub(crate) mod testutil {
     use super::*;
 

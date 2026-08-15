@@ -373,6 +373,10 @@ dependencies = [
 [[package]]
 name = "internet_checksum"
 version = "0.1.0"
+dependencies = [
+ "rand",
+ "rand_xorshift",
+]
 
 [[package]]
 name = "ip-test-macro"
@@ -553,6 +557,7 @@ name = "netstack3-core"
 version = "0.1.0"
 dependencies = [
  "assert_matches",
+ "criterion",
  "derivative",
  "lock-order",
  "log",

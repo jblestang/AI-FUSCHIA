@@ -12,11 +12,29 @@ testutils = ["instrumented"]
 instrumented = []
 # Skip dual-stack dispatch on the receive hot path (IPv4-only delivery, this-stack only).
 single-stack = []
-benchmark = ["single-stack", "netstack3_base/benchmark", "netstack3_ip/benchmark", "netstack3_filter/benchmark", "netstack3_datagram/benchmark", "dep:criterion"]
-benchmark-instrumented = ["benchmark", "testutils", "instrumented", "netstack3_base/testutils", "netstack3_ip/testutils", "netstack3_filter/testutils", "netstack3_datagram/testutils"]
+# No-op bindings receive path for throughput measurement (bench builds only).
+bench-receive = []
+# Enables everything needed by throughput benchmarks.
+benches = [
+    "testutils",
+    "single-stack",
+    "bench-receive",
+    "netstack3_base/testutils",
+    "netstack3_ip/testutils",
+    "netstack3_filter/testutils",
+    "netstack3_datagram/testutils",
+    "dep:criterion",
+]
+instrumented-testutils = [
+    "testutils",
+    "instrumented",
+    "netstack3_base/testutils",
+    "netstack3_ip/testutils",
+    "netstack3_filter/testutils",
+    "netstack3_datagram/testutils",
+]
 
 [dependencies]
-criterion = { workspace = true, optional = true }
 derivative = { workspace = true, features = ["use_core"] }
 either = { workspace = true }
 lock_order = { package = "lock-order", path = "../lock-order" }
@@ -33,15 +51,20 @@ packet = { path = "../../../libs/packet" }
 packet_formats = { package = "packet_formats", path = "../../../libs/packet-formats" }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
+criterion = { workspace = true, optional = true }
 
 [dev-dependencies]
+netstack3_base = { package = "netstack3-base", path = "../base", features = ["testutils", "single-threaded"] }
+netstack3_datagram = { package = "netstack3-datagram", path = "../datagram", features = ["testutils"] }
+netstack3_filter = { package = "netstack3-filter", path = "../filter", features = ["testutils"] }
+netstack3_ip = { package = "netstack3-ip", path = "../ip", features = ["testutils"] }
 netstack3_macros = { package = "netstack3-macros", path = "../macros" }
 
 [[bench]]
 name = "udp_receive_throughput"
 harness = false
-required-features = ["benchmark"]
+required-features = ["benches"]
 
 [[example]]
 name = "profile_udp_receive"
-required-features = ["benchmark"]
+required-features = ["benches"]

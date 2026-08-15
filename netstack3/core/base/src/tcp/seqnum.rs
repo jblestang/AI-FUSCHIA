@@ -351,7 +351,7 @@ impl UnscaledWindowSize {
     }
 }
 
-#[cfg(any(feature = "testutils", feature = "benchmark"))]
+#[cfg(any(feature = "testutils"))]
 mod testutils {
     use super::*;
 

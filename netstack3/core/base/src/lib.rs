@@ -181,7 +181,7 @@ pub mod sync {
 }
 
 /// Test utilities provided to all crates.
-#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+#[cfg(any(test, feature = "testutils"))]
 pub mod testutil {
     mod addr;
     mod benchmarks;
@@ -209,8 +209,6 @@ pub mod testutil {
     };
     pub use addr::{TEST_ADDRS_V4, TEST_ADDRS_V6, TestAddrs, TestDualStackIpExt, TestIpExt};
     pub use benchmarks::{Bencher, TestBencher};
-    #[cfg(feature = "benchmark")]
-    pub use benchmarks::RealBencher;
     pub use fake_bindings::FakeBindingsCtx;
     pub use fake_core::FakeCoreCtx;
     pub use fake_network::{
@@ -220,24 +218,3 @@ pub mod testutil {
     pub use monotonic_id::MonotonicIdentifier;
 }
 
-/// Aggregate Criterion benchmarks for netstack3 crates.
-#[cfg(feature = "benchmark")]
-pub mod benchmarks {
-    use core::time::Duration;
-
-    use criterion::{BenchmarkGroup, measurement::WallTime};
-
-    /// Shared Criterion settings for netstack3 throughput benchmarks.
-    pub fn configure_group(group: &mut BenchmarkGroup<'_, WallTime>) {
-        group.warm_up_time(Duration::from_millis(500));
-        group.measurement_time(Duration::from_secs(3));
-        group.sample_size(50);
-    }
-
-    /// Adds benchmarks defined in the base crate to the provided group.
-    pub fn add_benches(
-        group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    ) {
-        crate::data_structures::token_bucket::benchmarks::add_benches(group)
-    }
-}

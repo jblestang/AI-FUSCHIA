@@ -111,7 +111,7 @@ impl CounterRepr for Counter {
 }
 
 // Only allow `u64` as a counter in tests.
-#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+#[cfg(any(test, feature = "testutils"))]
 impl CounterRepr for u64 {
     fn get(&self) -> u64 {
         *self

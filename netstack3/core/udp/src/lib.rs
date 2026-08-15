@@ -6,7 +6,7 @@
 //!
 //! This crate contains the UDP implementation for netstack3.
 
-#![cfg_attr(not(feature = "benchmark"), no_std)]
+#![no_std]
 #![warn(
     missing_docs,
     unreachable_patterns,
@@ -14,8 +14,6 @@
     clippy::redundant_clone,
     clippy::precedence
 )]
-#[cfg(feature = "benchmark")]
-extern crate std;
 extern crate alloc;
 
 #[path = "."]
@@ -42,6 +40,6 @@ pub use internal::diagnostics::{UdpSocketDiagnosticTuple, UdpSocketDiagnostics};
 
 pub use internal::settings::UdpSettings;
 
-/// Throughput benchmarks for the UDP receive path.
-#[cfg(feature = "benchmark")]
-pub mod benchmarks;
+/// UDP receive throughput benchmark support (Criterion registration).
+#[cfg(feature = "benches")]
+pub mod bench_support;

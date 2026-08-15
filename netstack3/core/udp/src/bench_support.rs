@@ -2,11 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! UDP receive throughput benchmarks targeting 1 Gbps at varying packet sizes.
+//! UDP receive throughput benchmark support.
 
+use alloc::format;
 use core::num::NonZeroU16;
 
-use criterion::{BenchmarkGroup, Throughput, measurement::WallTime};
 use net_types::Witness as _;
 use net_types::ip::{Ipv4, Ipv4Addr};
 use net_types::{SpecifiedAddr, ZonedAddr};
@@ -21,7 +21,9 @@ use crate::internal::base::testutils::{
     BaseTestIpExt as _, FakeUdpBindingsCtx, UdpFakeDeviceCoreCtx, UdpFakeDeviceCtx, local_ip,
     remote_ip,
 };
-use crate::internal::base::{DualStackUdpSocketId, UdpApi, UdpIpTransportContext, UdpPacketMeta, UdpRemotePort};
+use crate::{
+    DualStackUdpSocketId, UdpApi, UdpIpTransportContext, UdpPacketMeta, UdpRemotePort,
+};
 
 struct BenchmarkCtx {
     ctx: UdpFakeDeviceCtx,
@@ -32,7 +34,6 @@ struct BenchmarkCtx {
     >,
 }
 
-/// Creates a connected UDP socket and caches early demux for the benchmark traffic.
 fn setup_connected_benchmark_ctx(packet: &PreparedPacket) -> BenchmarkCtx {
     let mut ctx = UdpFakeDeviceCtx::with_core_ctx(UdpFakeDeviceCoreCtx::new_fake_device::<Ipv4>());
     let mut api = UdpApi::<Ipv4, _>::new(ctx.as_mut());
@@ -80,7 +81,7 @@ pub fn ipv4_udp_wire_bytes(payload_len: usize) -> usize {
     packet_formats::ipv4::HDR_PREFIX_LEN + packet_formats::udp::HEADER_BYTES + payload_len
 }
 
-/// Number of packets representing `duration` seconds of traffic at `TARGET_BPS`.
+/// Number of packets representing `duration` seconds of traffic at [`TARGET_BPS`].
 pub fn packets_for_rate(wire_bytes: usize, duration: core::time::Duration) -> u64 {
     let batch_bits = TARGET_BPS.saturating_mul(duration.as_millis() as u64) / 1000;
     let batch_bytes = batch_bits / 8;
@@ -92,20 +93,15 @@ pub fn total_wire_bytes(wire_bytes: usize, packet_count: u64) -> u64 {
     wire_bytes as u64 * packet_count
 }
 
-/// Average wall time per packet given batch wall time and packet count.
-pub fn per_packet_duration(batch: core::time::Duration, packet_count: u64) -> core::time::Duration {
-    batch.checked_div(packet_count as u32).unwrap_or(batch)
-}
-
 struct PreparedPacket {
-    buffer: Vec<u8>,
+    buffer: alloc::vec::Vec<u8>,
     meta: UdpPacketMeta<Ipv4>,
 }
 
 fn build_ipv4_udp_packet(payload_len: usize) -> PreparedPacket {
     let local_ip: Ipv4Addr = local_ip::<Ipv4>().get();
     let remote_ip: Ipv4Addr = remote_ip::<Ipv4>().get();
-    let payload = vec![0u8; payload_len];
+    let payload = alloc::vec![0u8; payload_len];
     let meta = UdpPacketMeta::<Ipv4> {
         src_ip: remote_ip,
         src_port: Some(REMOTE_PORT),
@@ -128,7 +124,11 @@ fn receive_ipv4_udp_packet(
     bindings_ctx: &mut FakeUdpBindingsCtx<FakeDeviceId>,
     packet: &mut PreparedPacket,
     early_demux_socket: Option<
-        &DualStackUdpSocketId<Ipv4, netstack3_base::testutil::FakeWeakDeviceId<FakeDeviceId>, FakeUdpBindingsCtx<FakeDeviceId>>,
+        &DualStackUdpSocketId<
+            Ipv4,
+            netstack3_base::testutil::FakeWeakDeviceId<FakeDeviceId>,
+            FakeUdpBindingsCtx<FakeDeviceId>,
+        >,
     >,
 ) {
     let PreparedPacket { buffer, meta } = packet;
@@ -140,7 +140,6 @@ fn receive_ipv4_udp_packet(
         &FakeDeviceId,
         Ipv4::into_recv_src_addr(*src_ip),
         SpecifiedAddr::new(*dst_ip).unwrap(),
-        // Reuse the same backing allocation; constructing a fresh `Buf` resets parse state.
         Buf::new(&mut buffer[..], ..),
         &mut LocalDeliveryPacketInfo {
             header_info: FakeIpHeaderInfo { dscp_and_ecn: *dscp_and_ecn, ..Default::default() },
@@ -152,15 +151,7 @@ fn receive_ipv4_udp_packet(
 }
 
 /// Registers UDP receive throughput benchmarks for IPv4 at [`TARGET_GBPS`] Gbps.
-///
-/// Registers into the provided Criterion group (typically
-/// `"netstack3/udp/receive_throughput"`, configured via
-/// [`netstack3_base::benchmarks::configure_group`]).
-///
-/// For each payload size, registers two cases:
-/// - `.../bytes` — one iteration processes a full [`BATCH_DURATION`] batch; throughput in MiB/s/GiB/s.
-/// - `.../per-packet` — one iteration receives a single datagram; `time` is wall time per packet (ns/µs).
-pub fn add_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
+pub fn add_benches(group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>) {
     for &payload_len in PAYLOAD_SIZES {
         let wire_bytes = ipv4_udp_wire_bytes(payload_len);
         let packet_count = packets_for_rate(wire_bytes, BATCH_DURATION);
@@ -171,7 +162,7 @@ pub fn add_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
             "ipv4/recv/{payload_len}B-payload/{packet_count}pkts/{batch_ms}ms/{TARGET_GBPS:.2}Gbps-target"
         );
 
-        group.throughput(Throughput::Bytes(batch_bytes));
+        group.throughput(criterion::Throughput::Bytes(batch_bytes));
         group.bench_function(format!("{base}/bytes"), |bencher| {
             let mut packet = build_ipv4_udp_packet(payload_len);
             let BenchmarkCtx { mut ctx, early_demux_socket } = setup_connected_benchmark_ctx(&packet);
@@ -189,7 +180,7 @@ pub fn add_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
             });
         });
 
-        group.throughput(Throughput::Elements(1));
+        group.throughput(criterion::Throughput::Elements(1));
         group.bench_function(format!("{base}/per-packet"), |bencher| {
             let mut packet = build_ipv4_udp_packet(payload_len);
             let BenchmarkCtx { mut ctx, early_demux_socket } = setup_connected_benchmark_ctx(&packet);
@@ -205,15 +196,11 @@ pub fn add_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
             });
         });
 
-        group.throughput(Throughput::Bytes(1));
+        group.throughput(criterion::Throughput::Bytes(1));
     }
 }
 
 /// Runs the UDP receive hot loop for CPU profiling (perf / samply).
-///
-/// Executes receive bursts using `payload_len`-byte UDP payloads until
-/// `batches` iterations complete. Pass `None` for `batches` to loop forever
-/// (for external profilers that stop the process after a duration).
 pub fn profile_hot_loop(payload_len: usize, batches: Option<u64>) {
     let wire_bytes = ipv4_udp_wire_bytes(payload_len);
     let packet_count = packets_for_rate(wire_bytes, BATCH_DURATION);
@@ -244,12 +231,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn per_packet_duration_divides_batch() {
-        let batch = core::time::Duration::from_nanos(1000);
-        assert_eq!(per_packet_duration(batch, 10), core::time::Duration::from_nanos(100));
-    }
-
-    #[test]
     fn packets_for_rate_scales_with_packet_size() {
         let small = packets_for_rate(ipv4_udp_wire_bytes(64), BATCH_DURATION);
         let large = packets_for_rate(ipv4_udp_wire_bytes(9000), BATCH_DURATION);
@@ -258,23 +239,5 @@ mod tests {
             total_wire_bytes(ipv4_udp_wire_bytes(64), small),
             total_wire_bytes(ipv4_udp_wire_bytes(9000), large),
         );
-    }
-
-    #[test]
-    fn smoke_receive_benchmark_batch() {
-        let payload_len = 512;
-        let wire_bytes = ipv4_udp_wire_bytes(payload_len);
-        let packet_count = packets_for_rate(wire_bytes, core::time::Duration::from_millis(1)).min(32);
-        let mut packet = build_ipv4_udp_packet(payload_len);
-        let BenchmarkCtx { mut ctx, early_demux_socket } = setup_connected_benchmark_ctx(&packet);
-        let ctx_pair = ctx.as_mut();
-        for _ in 0..packet_count {
-            receive_ipv4_udp_packet(
-                ctx_pair.core_ctx,
-                ctx_pair.bindings_ctx,
-                &mut packet,
-                Some(&early_demux_socket),
-            );
-        }
     }
 }

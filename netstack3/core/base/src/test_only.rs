@@ -7,7 +7,7 @@
 pub use inner::TestOnlyPartialEq;
 
 // The implementation for test code.
-#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+#[cfg(any(test, feature = "testutils"))]
 mod inner {
     pub use crate::Counter;
 
@@ -26,7 +26,7 @@ mod inner {
 }
 
 // The implementation for non-test code
-#[cfg(not(any(test, feature = "testutils", feature = "benchmark")))]
+#[cfg(not(any(test, feature = "testutils")))]
 mod inner {
 
     /// Applies `PartialEq` bounds, only in tests.

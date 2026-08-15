@@ -6,20 +6,23 @@
 //!
 //! Prefer the unified harness when running multiple crates:
 //! ```text
-//! cargo bench -p netstack3-core --features benchmark --bench netstack3
+//! cargo bench -p netstack3-core --bench netstack3
 //! ```
 //!
-//! UDP-only:
+//! UDP-only (requires the `benches` feature on this crate):
 //! ```text
-//! cargo bench -p netstack3-udp --features benchmark --bench udp_receive_throughput
+//! cargo bench -p netstack3-udp --features benches --bench udp_receive_throughput
 //! ```
+
+#[path = "../../benches/common.rs"]
+mod common;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
 fn bench_udp_receive(c: &mut Criterion) {
     let mut group = c.benchmark_group("netstack3/udp/receive_throughput");
-    netstack3_base::benchmarks::configure_group(&mut group);
-    netstack3_udp::benchmarks::add_benches(&mut group);
+    common::configure_group(&mut group);
+    netstack3_udp::bench_support::add_benches(&mut group);
     group.finish();
 }
 

@@ -1058,7 +1058,7 @@ impl<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes>
 impl<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> UdpSocketId<I, D, BT> {
     /// Returns the inner state for this socket, sidestepping locking
     /// mechanisms.
-    #[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+    #[cfg(any(test, feature = "testutils"))]
     pub fn state(&self) -> &RwLock<UdpSocketState<I, D, BT>> {
         let Self(rc) = self;
         rc.state()
@@ -3053,7 +3053,7 @@ where
     }
 
     /// Returns the currently available send buffer space on the socket.
-    #[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+    #[cfg(any(test, feature = "testutils"))]
     pub fn send_buffer_available(&mut self, id: &UdpApiSocketId<I, C>) -> usize {
         self.datagram().send_buffer_available(id)
     }
@@ -3481,7 +3481,7 @@ impl<
     }
 }
 
-#[cfg(any(test, feature = "benchmark"))]
+#[cfg(any(test, feature = "testutils"))]
 pub(crate) mod testutils {
     use alloc::borrow::ToOwned;
     use alloc::vec;
@@ -3701,13 +3701,13 @@ pub(crate) mod testutils {
             meta: UdpPacketMeta<I>,
             body: &[u8],
         ) -> Result<(), ReceiveUdpError> {
-            // Benchmarks measure stack receive throughput, not bindings queue behavior.
-            #[cfg(feature = "benchmark")]
+            // Throughput benchmarks measure stack receive, not bindings queue behavior.
+            #[cfg(feature = "bench-receive")]
             {
                 let _ = (id, meta, body);
                 return Ok(());
             }
-            #[cfg(not(feature = "benchmark"))]
+            #[cfg(not(feature = "bench-receive"))]
             {
                 let SocketReceived { packets, max_size } =
                     self.state.received_mut::<I>().entry(id.downgrade()).or_default();

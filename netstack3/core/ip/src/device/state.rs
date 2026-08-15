@@ -331,7 +331,7 @@ impl<BT: IpDeviceStateBindingsTypes> OrderedLockAccess<SlaacState<BT>>
 
 impl<I: IpDeviceStateIpExt, BT: IpDeviceStateBindingsTypes> IpDeviceState<I, BT> {
     /// A direct accessor to `IpDeviceAddresses` available in tests.
-    #[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+    #[cfg(any(test, feature = "testutils"))]
     pub fn addrs(&self) -> &RwLock<IpDeviceAddresses<I, BT>> {
         &self.addrs
     }

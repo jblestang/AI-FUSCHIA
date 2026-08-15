@@ -1993,7 +1993,7 @@ where
     }
 }
 
-#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+#[cfg(any(test, feature = "testutils"))]
 pub(crate) mod testutil {
     use alloc::boxed::Box;
 

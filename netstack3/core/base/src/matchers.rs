@@ -755,7 +755,7 @@ impl<DeviceClass> IpSocketPropertiesMatcher<DeviceClass> for [IpSocketMatcher<De
     }
 }
 
-#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+#[cfg(any(test, feature = "testutils"))]
 pub(crate) mod testutil {
     use alloc::string::String;
     use core::num::NonZeroU64;

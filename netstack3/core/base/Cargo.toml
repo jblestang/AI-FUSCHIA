@@ -8,34 +8,32 @@ license.workspace = true
 name = "netstack3_base"
 
 [features]
-testutils = ["instrumented", "netstack3_sync/testutils", "benchmark", "dep:net_declare", "dep:teststd", "dep:assert_matches", "dep:rand_xorshift"]
+testutils = ["instrumented", "netstack3_sync/testutils"]
 instrumented = ["netstack3_sync/instrumented"]
 single-threaded = ["netstack3_sync/single-threaded"]
-benchmark = ["single-threaded", "netstack3_sync/benchmark", "dep:criterion", "dep:net_declare", "dep:teststd", "dep:assert_matches", "dep:rand_xorshift"]
 
 [dependencies]
 arc-swap = { workspace = true }
 arrayvec = { workspace = true }
-assert_matches = { workspace = true, optional = true }
+assert_matches = { workspace = true }
 bitflags = { workspace = true }
-criterion = { workspace = true, optional = true }
 derivative = { workspace = true, features = ["use_core"] }
 diagnostics_traits = { package = "diagnostics-traits", path = "../../../libs/diagnostics-traits" }
 either = { workspace = true }
 explicit = { path = "../../../libs/explicit" }
 log = { workspace = true }
-net_declare = { package = "net-declare", path = "../../../libs/net-declare", optional = true }
+net_declare = { package = "net-declare", path = "../../../libs/net-declare" }
 net_types = { package = "net-types", path = "../../../libs/net-types" }
 netstack3_hashmap = { package = "netstack3-hashmap", path = "../hashmap" }
 netstack3_sync = { package = "netstack3-sync", path = "../sync" }
 packet = { path = "../../../libs/packet" }
 packet_formats = { package = "packet_formats", path = "../../../libs/packet-formats" }
 rand = { workspace = true }
-rand_xorshift = { workspace = true, optional = true }
+rand_xorshift = { workspace = true }
 smallvec = { workspace = true }
 static_assertions = { workspace = true }
 strum = { workspace = true }
 strum_macros = { workspace = true }
-teststd = { path = "../teststd", optional = true }
+teststd = { path = "../teststd" }
 thiserror = { workspace = true }
 zerocopy = { workspace = true, features = ["derive"] }

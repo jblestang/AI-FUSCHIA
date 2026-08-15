@@ -4,7 +4,7 @@
 
 //! A networking stack.
 
-#![cfg_attr(not(feature = "benchmark"), no_std)]
+#![no_std]
 // TODO(https://fxbug.dev/339502691): Return to the default limit once lock
 // ordering no longer causes overflows.
 #![recursion_limit = "256"]
@@ -19,8 +19,6 @@
     clippy::precedence
 )]
 extern crate alloc;
-#[cfg(feature = "benchmark")]
-extern crate std;
 
 mod api;
 mod context;
@@ -33,10 +31,6 @@ mod transport;
 
 #[cfg(any(test, feature = "testutils"))]
 pub mod testutil;
-
-/// Aggregate Criterion benchmarks for netstack3 crates.
-#[cfg(feature = "benchmark")]
-pub mod benchmarks;
 
 /// Data structures.
 pub mod data_structures {

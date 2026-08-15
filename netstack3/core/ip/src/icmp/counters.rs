@@ -51,7 +51,7 @@ impl IcmpCountersIpExt for Ipv6 {
 /// ICMP tx path counters.
 #[derive(Default, Debug)]
 #[cfg_attr(
-    any(test, feature = "testutils", feature = "benchmark"),
+    any(test, feature = "testutils"),
     derive(PartialEq, netstack3_macros::CounterCollection)
 )]
 pub struct IcmpTxCounters<I: IcmpCountersIpExt, C: CounterRepr = Counter> {
@@ -93,7 +93,7 @@ impl<I: IcmpCountersIpExt> Inspectable for IcmpTxCounters<I> {
 /// ICMP rx path counters.
 #[derive(Default, Debug)]
 #[cfg_attr(
-    any(test, feature = "testutils", feature = "benchmark"),
+    any(test, feature = "testutils"),
     derive(PartialEq, netstack3_macros::CounterCollection)
 )]
 pub struct IcmpRxCounters<I: IcmpCountersIpExt, C: CounterRepr = Counter> {
@@ -159,7 +159,7 @@ impl<I: IcmpCountersIpExt> Inspectable for IcmpRxCounters<I> {
 /// As defined by IANA:
 /// https://www.iana.org/assignments/icmp-parameters/icmp-parameters.xhtml#icmp-parameters-codes-3
 #[derive(Default, Debug, netstack3_macros::CounterCollection)]
-#[cfg_attr(any(test, feature = "testutils", feature = "benchmark"), derive(PartialEq,))]
+#[cfg_attr(any(test, feature = "testutils"), derive(PartialEq,))]
 pub struct Icmpv4DestUnreachableCounters<C: CounterRepr = Counter> {
     /// Network Unreachable, code 0
     pub dest_network_unreachable: C,
@@ -269,7 +269,7 @@ impl<C: CounterRepr> Inspectable for Icmpv4DestUnreachableCounters<C> {
 /// As defined by IANA:
 /// https://www.iana.org/assignments/icmpv6-parameters/icmpv6-parameters.xhtml#icmpv6-parameters-codes-2
 #[derive(Default, Debug, netstack3_macros::CounterCollection)]
-#[cfg_attr(any(test, feature = "testutils", feature = "benchmark"), derive(PartialEq,))]
+#[cfg_attr(any(test, feature = "testutils"), derive(PartialEq,))]
 pub struct Icmpv6DestUnreachableCounters<C: CounterRepr = Counter> {
     /// No route to destination, code 0
     pub no_route: C,
@@ -332,7 +332,7 @@ impl<C: CounterRepr> Inspectable for Icmpv6DestUnreachableCounters<C> {
 /// As defined by IANA:
 /// https://www.iana.org/assignments/icmp-parameters/icmp-parameters.xhtml#icmp-parameters-codes-11
 #[derive(Default, Debug, netstack3_macros::CounterCollection)]
-#[cfg_attr(any(test, feature = "testutils", feature = "benchmark"), derive(PartialEq,))]
+#[cfg_attr(any(test, feature = "testutils"), derive(PartialEq,))]
 pub struct Icmpv4TimeExceededCounters<C: CounterRepr = Counter> {
     /// Time to Live exceeded in Transit, code 0
     pub ttl_expired: C,
@@ -365,7 +365,7 @@ impl<C: CounterRepr> Inspectable for Icmpv4TimeExceededCounters<C> {
 /// As defined by IANA:
 /// https://www.iana.org/assignments/icmpv6-parameters/icmpv6-parameters.xhtml#icmpv6-parameters-codes-4
 #[derive(Default, Debug, netstack3_macros::CounterCollection)]
-#[cfg_attr(any(test, feature = "testutils", feature = "benchmark"), derive(PartialEq,))]
+#[cfg_attr(any(test, feature = "testutils"), derive(PartialEq,))]
 pub struct Icmpv6TimeExceededCounters<C: CounterRepr = Counter> {
     /// Hop limit exceeded in transit, code 0
     pub hop_limit_exceeded: C,
@@ -399,7 +399,7 @@ impl<C: CounterRepr> Inspectable for Icmpv6TimeExceededCounters<C> {
 /// As defined by IANA:
 /// https://www.iana.org/assignments/icmp-parameters/icmp-parameters.xhtml#icmp-parameters-codes-12
 #[derive(Default, Debug, netstack3_macros::CounterCollection)]
-#[cfg_attr(any(test, feature = "testutils", feature = "benchmark"), derive(PartialEq,))]
+#[cfg_attr(any(test, feature = "testutils"), derive(PartialEq,))]
 pub struct Icmpv4ParameterProblemCounters<C: CounterRepr = Counter> {
     /// Pointer indicates the error, code 0
     pub pointer_indicates_error: C,
@@ -439,7 +439,7 @@ impl<C: CounterRepr> Inspectable for Icmpv4ParameterProblemCounters<C> {
 /// As defined by IANA:
 /// https://www.iana.org/assignments/icmpv6-parameters/icmpv6-parameters.xhtml#icmpv6-parameters-codes-5
 #[derive(Default, Debug, netstack3_macros::CounterCollection)]
-#[cfg_attr(any(test, feature = "testutils", feature = "benchmark"), derive(PartialEq,))]
+#[cfg_attr(any(test, feature = "testutils"), derive(PartialEq,))]
 pub struct Icmpv6ParameterProblemCounters<C: CounterRepr = Counter> {
     /// Erroneous header field encountered, code 0
     pub erroneous_header_field: C,

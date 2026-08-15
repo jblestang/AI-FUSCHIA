@@ -376,7 +376,7 @@ pub struct IpSock<I: IpExt, D> {
 
 impl<I: IpExt, D> IpSock<I, D> {
     /// Returns the socket's definition.
-    #[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+    #[cfg(any(test, feature = "testutils"))]
     pub fn definition(&self) -> &IpSockDefinition<I, D> {
         &self.definition
     }
@@ -1591,7 +1591,7 @@ pub(crate) mod ipv6_source_address_selection {
 }
 
 /// Test fake implementations of the traits defined in the `socket` module.
-#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
+#[cfg(any(test, feature = "testutils"))]
 pub(crate) mod testutil {
     use alloc::boxed::Box;
     use alloc::vec::Vec;
