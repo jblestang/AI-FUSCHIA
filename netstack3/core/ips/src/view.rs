@@ -5,6 +5,7 @@
 //! Multi-layer zero-copy views delivered to Layer 7 IPS analysis.
 
 use alloc::vec::Vec;
+use core::mem;
 use core::ops::Range;
 
 use net_types::ip::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -224,22 +225,61 @@ impl ReceivedUdpDatagramView {
         }
     }
 
-    /// Applies metadata after consolidating to a single unfragmented IPv4 frame.
-    pub(crate) fn apply_unfragmented_overwrite(
+    /// Truncates a stored frame buffer to `new_len` bytes (no-op if already shorter).
+    pub(crate) fn truncate_eth_frame(&mut self, index: usize, new_len: usize) -> bool {
+        let Some(frame) = self.eth_frames.get_mut(index) else {
+            return false;
+        };
+        if frame.as_ref().len() <= new_len {
+            return true;
+        }
+        let placeholder = Buf::new(Vec::new(), 0..0);
+        let (mut buf, body) = mem::replace(frame, placeholder).into_parts();
+        buf.truncate(new_len);
+        let body_start = body.start.min(new_len);
+        *frame = Buf::new(buf, body_start..new_len);
+        true
+    }
+
+    /// Drops Ethernet frame buffers after `keep_through_index` (inclusive).
+    pub(crate) fn retain_eth_frames_through(&mut self, keep_through_index: usize) {
+        if keep_through_index + 1 < self.eth_frames.len() {
+            self.eth_frames.truncate(keep_through_index + 1);
+        }
+    }
+
+    /// Updates view metadata after shrinking to one unfragmented IPv4 frame in place.
+    pub(crate) fn apply_single_frame_length_change(
         &mut self,
-        eth_frames: Vec<Buf<Vec<u8>>>,
-        ip_fragment: IpFragmentInfo,
-        udp_header: UdpHeaderView,
+        frame_index: usize,
+        ip_packet_range: Range<usize>,
+        ip_body_range: Range<usize>,
         payload_range: Range<usize>,
+        udp_length: u16,
     ) {
-        self.eth_frames = eth_frames;
+        let identification = self
+            .ip_fragments
+            .first()
+            .map(|f| f.identification)
+            .unwrap_or(0);
+        let ip_fragment = IpFragmentInfo {
+            eth_frame_index: frame_index,
+            ip_packet_range,
+            identification,
+            fragment_offset: 0,
+            more_fragments: false,
+            ip_body_range,
+        };
         self.ip_fragments = alloc::vec![ip_fragment.clone()];
         self.fragment_metadata.fragments = alloc::vec![ip_fragment];
         self.fragment_metadata.reassembly_outcome = ReassemblyOutcome::NotApplicable;
         self.fragment_metadata.events.clear();
-        self.udp_header = Some(udp_header);
+        if let Some(hdr) = self.udp_header.as_mut() {
+            hdr.length = udp_length;
+            hdr.eth_frame_index = frame_index;
+        }
         self.payload_parts = alloc::vec![PayloadPart {
-            eth_frame_index: 0,
+            eth_frame_index: frame_index,
             range: payload_range,
         }];
     }

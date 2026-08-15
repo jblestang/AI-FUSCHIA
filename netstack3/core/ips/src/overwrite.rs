@@ -72,9 +72,11 @@ impl<'a> UdpOverwriter<'a> {
 
     /// Replaces the UDP payload, updating UDP/IPv4 lengths and checksums.
     ///
-    /// Fragmented datagrams are consolidated into a single Ethernet frame when
-    /// the payload length changes. Same-length fragmented payloads are patched
-    /// across existing slice parts without consolidation.
+    /// Single-frame datagrams are patched in place (like
+    /// [`Self::overwrite_payload_in_place`]) with metadata and buffer truncation
+    /// updated to the new wire length. Multi-frame datagrams that shrink to one
+    /// frame write only into the first backing buffer, drop surplus frames, and
+    /// truncate to the bytes needed on the wire.
     pub fn overwrite_payload(&mut self, new_payload: &[u8]) -> Result<(), UdpOverwriteError> {
         self.validate_writable()?;
         let current = self.current_payload_len();
@@ -83,8 +85,11 @@ impl<'a> UdpOverwriter<'a> {
         } else if current == new_payload.len() {
             self.overwrite_payload_parts(new_payload)?;
             self.refresh_udp_checksum_only(new_payload.len())?;
+        } else if self.is_single_part_unfragmented() {
+            self.overwrite_single_frame(new_payload)?;
+            self.commit_single_frame_length_change(new_payload.len())?;
         } else {
-            self.consolidate_and_write(new_payload)?;
+            self.shrink_to_single_frame(new_payload)?;
         }
         Ok(())
     }
@@ -201,59 +206,56 @@ impl<'a> UdpOverwriter<'a> {
         Ok(())
     }
 
-    fn consolidate_and_write(&mut self, new_payload: &[u8]) -> Result<(), UdpOverwriteError> {
+    fn commit_single_frame_length_change(&mut self, new_payload_len: usize) -> Result<(), UdpOverwriteError> {
+        let frag = self.view.ip_fragments().first().expect("fragment").clone();
+        let udp_hdr = self.view.udp_header().expect("validated");
+        let ip_offset = frag.ip_packet_range.start;
+        let ip_body_start = udp_hdr.header_range.start;
+        let payload_start = udp_hdr.header_range.end;
+        let payload_end = payload_start + new_payload_len;
+        let wire_len = payload_end;
+
+        self.view.truncate_eth_frame(frag.eth_frame_index, wire_len);
+        self.view.apply_single_frame_length_change(
+            frag.eth_frame_index,
+            ip_offset..payload_end,
+            ip_body_start..payload_end,
+            payload_start..payload_end,
+            u16::try_from(HEADER_BYTES + new_payload_len).unwrap_or(u16::MAX),
+        );
+        Ok(())
+    }
+
+    fn shrink_to_single_frame(&mut self, new_payload: &[u8]) -> Result<(), UdpOverwriteError> {
         let first_frag = self.view.ip_fragments().first().expect("fragment").clone();
-        let udp_hdr = self.view.udp_header().expect("validated").clone();
         let ip_offset = first_frag.ip_packet_range.start;
         let ip_hdr_len = first_frag.ip_body_range.start - ip_offset;
         let payload_start = first_frag.ip_body_range.start + HEADER_BYTES;
         let payload_end = payload_start + new_payload.len();
+        let frame_index = first_frag.eth_frame_index;
 
-        let frame_len = ip_offset + ip_hdr_len + HEADER_BYTES + new_payload.len();
-        if !self.view.ensure_eth_frame_len(first_frag.eth_frame_index, frame_len) {
+        let wire_len = ip_offset + ip_hdr_len + HEADER_BYTES + new_payload.len();
+        if !self.view.ensure_eth_frame_len(frame_index, wire_len) {
             return Err(UdpOverwriteError::MissingUdpHeader);
         }
         {
             let buf = self
                 .view
-                .eth_frame_buf_mut(first_frag.eth_frame_index)
+                .eth_frame_buf_mut(frame_index)
                 .ok_or(UdpOverwriteError::MissingUdpHeader)?;
             buf[payload_start..payload_end].copy_from_slice(new_payload);
         }
 
-        self.patch_unfragmented_lengths_and_checksums(
-            first_frag.eth_frame_index,
-            ip_offset,
-            payload_end,
-        )?;
+        self.patch_unfragmented_lengths_and_checksums(frame_index, ip_offset, payload_end)?;
 
-        let frame_bytes = self
-            .view
-            .eth_frame_buf(first_frag.eth_frame_index)
-            .expect("frame")
-            .to_vec();
-        let frame_len = ip_offset + ip_hdr_len + HEADER_BYTES + new_payload.len();
-
-        let updated_udp = UdpHeaderView {
-            length: u16::try_from(HEADER_BYTES + new_payload.len()).unwrap_or(u16::MAX),
-            header_range: first_frag.ip_body_range.start..payload_start,
-            ..udp_hdr
-        };
-
-        let ip_fragment = IpFragmentInfo {
-            eth_frame_index: 0,
-            ip_packet_range: ip_offset..frame_len,
-            identification: first_frag.identification,
-            fragment_offset: 0,
-            more_fragments: false,
-            ip_body_range: (ip_offset + ip_hdr_len)..frame_len,
-        };
-
-        self.view.apply_unfragmented_overwrite(
-            alloc::vec![packet::Buf::new(frame_bytes, ..)],
-            ip_fragment,
-            updated_udp,
+        self.view.truncate_eth_frame(frame_index, payload_end);
+        self.view.retain_eth_frames_through(frame_index);
+        self.view.apply_single_frame_length_change(
+            frame_index,
+            ip_offset..payload_end,
+            (ip_offset + ip_hdr_len)..payload_end,
             payload_start..payload_end,
+            u16::try_from(HEADER_BYTES + new_payload.len()).unwrap_or(u16::MAX),
         );
         Ok(())
     }
@@ -579,6 +581,11 @@ mod tests {
         assert!(!mf, "IPv4 MF flag must be cleared in the on-wire header");
         assert_eq!(frag_off, 0, "IPv4 fragment offset must be zero");
         assert!(frame_parseable(frame));
+        assert_eq!(
+            frame.len(),
+            ETHERNET_HDR_LEN_NO_TAG + usize::from(EXPECTED_IP_TOTAL),
+            "consolidated frame must be truncated to wire length"
+        );
     }
 
     #[test]
@@ -598,6 +605,9 @@ mod tests {
         assert_eq!(ip_total, 60);
         assert!(!mf);
         assert_eq!(frag_off, 0);
+
+        let frag = &view.ip_fragments()[0];
+        assert_eq!(frag.ip_packet_range.end, frame.len(), "frame buffer must match wire length");
     }
 
     #[test]
