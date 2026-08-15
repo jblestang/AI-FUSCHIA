@@ -1231,6 +1231,10 @@ mod tests {
             ReassemblyOutcome::NotApplicable
         );
         assert_eq!(view.payload_slices().iter().next().unwrap(), PAYLOAD);
+        let eth = view.ethernet_header().expect("ethernet header");
+        assert_eq!(eth.src_mac, SRC_MAC);
+        assert_eq!(eth.dst_mac, DST_MAC);
+        assert_eq!(eth.ethertype, Some(EtherType::Ipv4));
         match view.addrs() {
             (IpAddr::V4(src), IpAddr::V4(dst)) => {
                 assert_eq!(src, remote(2));
@@ -1326,6 +1330,10 @@ mod tests {
             _ => panic!("expected IPv6 addrs"),
         }
         assert_eq!(handler.views[0].payload_slices().iter().next().unwrap(), PAYLOAD);
+        let eth = handler.views[0].ethernet_header().expect("ethernet header");
+        assert_eq!(eth.src_mac, SRC_MAC);
+        assert_eq!(eth.dst_mac, DST_MAC);
+        assert_eq!(eth.ethertype, Some(EtherType::Ipv6));
     }
 
     #[test]
