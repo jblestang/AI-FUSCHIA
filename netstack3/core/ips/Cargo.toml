@@ -50,6 +50,10 @@ name = "udp_overwrite_payload"
 required-features = ["testutils"]
 
 [[example]]
+name = "inspect_tcp_unknown_options"
+required-features = ["testutils"]
+
+[[example]]
 name = "multi_source_fragments"
 required-features = ["testutils"]
 

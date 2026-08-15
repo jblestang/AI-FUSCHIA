@@ -19,8 +19,8 @@ use net_types::ip::Ipv4Addr;
 use netstack3_base::testutil::FakeDeviceId;
 use netstack3_base::NetworkSerializationContext;
 use netstack3_ips::{
-    IpsReceiveBindingsContext, IpsReceiveError, IpsState, ReceivedUdpDatagramView,
-    UdpOverwriteChecksum, process_ethernet_frame,
+    IpsReceiveBindingsContext, IpsReceiveError, IpsState, ReceivedTcpSegmentView,
+    ReceivedUdpDatagramView, UdpOverwriteChecksum, process_ethernet_frame,
 };
 use packet::{Buf, NestableSerializer as _, Serializer};
 use packet_formats::ethernet::{EtherType, ETHERNET_HDR_LEN_NO_TAG, EthernetFrameBuilder};
@@ -68,6 +68,14 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for SanitizingAgent {
             .expect("overwrite payload with updated lengths");
 
         self.view = Some(view);
+        Ok(())
+    }
+
+    fn receive_tcp_segment(
+        &mut self,
+        _device: &FakeDeviceId,
+        _view: ReceivedTcpSegmentView,
+    ) -> Result<(), IpsReceiveError> {
         Ok(())
     }
 }
