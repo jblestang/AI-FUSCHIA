@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::convert::Infallible as Never;
 use core::fmt::Debug;
@@ -2668,6 +2669,7 @@ fn dispatch_receive_ipv4_packet<
 
     let mut receive_meta = receive_meta;
     let frame_storage = receive_meta.frame_storage.take();
+    let ip_fragment_chain = receive_meta.ip_fragment_chain.take();
 
     let (prefix, options, body) = packet.parts_with_body_mut();
     let header_info = Ipv4HeaderInfo { prefix, options: options.as_ref() };
@@ -2676,6 +2678,7 @@ fn dispatch_receive_ipv4_packet<
         header_info,
         marks,
         frame_storage,
+        ip_fragment_chain,
     };
 
     let transport = Buf::new(body, ..);
@@ -2814,10 +2817,12 @@ fn dispatch_receive_ipv6_packet<
 
     let mut meta = meta;
     let frame_storage = meta.frame_storage.take();
+    let ip_fragment_chain = meta.ip_fragment_chain.take();
 
     let (fixed, extension, body) = packet.parts_with_body_mut();
     let header_info = Ipv6HeaderInfo { fixed, extension };
-    let mut receive_info = LocalDeliveryPacketInfo { meta, header_info, marks, frame_storage };
+    let mut receive_info =
+        LocalDeliveryPacketInfo { meta, header_info, marks, frame_storage, ip_fragment_chain };
 
     let transport = Buf::new(body, ..);
 
@@ -3357,7 +3362,10 @@ enum ProcessFragmentResult<'a, I: IpLayerIpExt> {
 
     /// A packet was successfully reassembled into the provided buffer. If a
     /// parsed packet is needed, then the caller must perform that parsing.
-    Reassembled(Vec<u8>),
+    Reassembled {
+        buffer: Vec<u8>,
+        ip_fragment_chain: alloc::sync::Arc<[crate::internal::fragment_chain::PacketSegment]>,
+    },
 }
 
 /// Process a fragment and reassemble if required.
@@ -3370,6 +3378,7 @@ fn process_fragment<'a, I, CC, BC>(
     bindings_ctx: &mut BC,
     device: &CC::DeviceId,
     packet: I::Packet<&'a mut [u8]>,
+    wire_fragment: Option<crate::internal::fragment_chain::PacketSegment>,
 ) -> ProcessFragmentResult<'a, I>
 where
     I: IpLayerIpExt,
@@ -3377,7 +3386,12 @@ where
     CC: IpLayerIngressContext<I, BC>,
     BC: IpLayerBindingsContext<I, CC::DeviceId>,
 {
-    match FragmentHandler::<I, _>::process_fragment::<&mut [u8]>(core_ctx, bindings_ctx, packet) {
+    match FragmentHandler::<I, _>::process_fragment::<&mut [u8]>(
+        core_ctx,
+        bindings_ctx,
+        packet,
+        wire_fragment,
+    ) {
         // Handle the packet right away since reassembly is not needed.
         FragmentProcessingState::NotNeeded(packet) => {
             trace!("receive_ip_packet: not fragmented");
@@ -3397,7 +3411,10 @@ where
                 buffer.buffer_view_mut(),
             ) {
                 // Successfully reassembled the packet, handle it.
-                Ok(()) => ProcessFragmentResult::Reassembled(buffer.into_inner()),
+                Ok(ip_fragment_chain) => ProcessFragmentResult::Reassembled {
+                    buffer: buffer.into_inner(),
+                    ip_fragment_chain,
+                },
                 Err(e) => {
                     core_ctx.increment_both(device, |c| &c.fragment_reassembly_error);
                     debug!("receive_ip_packet: fragmented, failed to reassemble: {:?}", e);
@@ -3510,10 +3527,17 @@ pub fn receive_ipv4_packet<
     }
 
     let mut buffer = buffer.into_pinned_frame();
-    let rx_frame_storage = buffer.rx_frame_storage();
+    let mut rx_frame_storage = buffer.rx_frame_storage();
 
     core_ctx.increment_both(device, |c| &c.receive_ip_packet);
     trace!("receive_ip_packet({device:?})");
+
+    let wire_fragment = rx_frame_storage.as_ref().and_then(|frame| {
+        crate::internal::fragment_chain::PacketSegment::view_of_subslice(
+            Arc::clone(frame),
+            buffer.as_ref(),
+        )
+    });
 
     let packet: Ipv4Packet<_> = match try_parse_ip_packet!(buffer) {
         Ok(packet) => packet,
@@ -3571,11 +3595,15 @@ pub fn receive_ipv4_packet<
     // because the fragment data is in the fixed header so it is always present
     // (even if the fragment data has values that implies that the packet is not
     // fragmented).
-    let mut packet = match process_fragment(core_ctx, bindings_ctx, device, packet) {
+    let mut ip_fragment_chain = None;
+    let mut packet = match process_fragment(core_ctx, bindings_ctx, device, packet, wire_fragment)
+    {
         ProcessFragmentResult::Done => return,
         ProcessFragmentResult::NotNeeded(packet) => packet,
-        ProcessFragmentResult::Reassembled(vec) => {
+        ProcessFragmentResult::Reassembled { buffer: vec, ip_fragment_chain: chain } => {
+            ip_fragment_chain = Some(chain);
             buffer = PinnedFrameBuffer::from_vec(vec);
+            rx_frame_storage = buffer.rx_frame_storage();
 
             match buffer.parse_mut() {
                 Ok(packet) => packet,
@@ -3624,6 +3652,7 @@ pub fn receive_ipv4_packet<
                 transparent_override: Some(TransparentLocalDelivery { addr, port }),
                 parsing_context,
                 frame_storage: rx_frame_storage.clone(),
+                ip_fragment_chain: ip_fragment_chain.clone(),
             };
 
             // Short-circuit the routing process and override local demux, providing a local
@@ -3698,6 +3727,7 @@ pub fn receive_ipv4_packet<
                     transparent_override: None,
                     parsing_context,
                     frame_storage: rx_frame_storage.clone(),
+                    ip_fragment_chain: ip_fragment_chain.clone(),
                 };
                 dispatch_receive_ipv4_packet(
                     core_ctx,
@@ -3743,6 +3773,7 @@ pub fn receive_ipv4_packet<
                 transparent_override: None,
                 parsing_context,
                 frame_storage: rx_frame_storage.clone(),
+                ip_fragment_chain: ip_fragment_chain.clone(),
             };
             dispatch_receive_ipv4_packet(
                 core_ctx,
@@ -3920,10 +3951,18 @@ pub fn receive_ipv6_packet<
     }
 
     let mut buffer = buffer.into_pinned_frame();
-    let rx_frame_storage = buffer.rx_frame_storage();
+    let mut rx_frame_storage = buffer.rx_frame_storage();
+    let mut ip_fragment_chain = None;
 
     core_ctx.increment_both(device, |c| &c.receive_ip_packet);
     trace!("receive_ipv6_packet({:?})", device);
+
+    let wire_fragment = rx_frame_storage.as_ref().and_then(|frame| {
+        crate::internal::fragment_chain::PacketSegment::view_of_subslice(
+            Arc::clone(frame),
+            buffer.as_ref(),
+        )
+    });
 
     let packet: Ipv6Packet<_> = match try_parse_ip_packet!(buffer) {
         Ok(packet) => packet,
@@ -4020,7 +4059,8 @@ pub fn receive_ipv6_packet<
                 // possible when the packet has the fragment extension
                 // header (even if the fragment data has values that implies
                 // that the packet is not fragmented).
-                match process_fragment(core_ctx, bindings_ctx, device, packet) {
+                let wire = wire_fragment.clone();
+                match process_fragment(core_ctx, bindings_ctx, device, packet, wire) {
                     ProcessFragmentResult::Done => return,
                     ProcessFragmentResult::NotNeeded(packet) => {
                         // While strange, it's possible for there to be a Fragment
@@ -4039,8 +4079,10 @@ pub fn receive_ipv6_packet<
                         // Fragment header.
                         (packet, Some(Ipv6PacketAction::Continue))
                     }
-                    ProcessFragmentResult::Reassembled(vec) => {
+                    ProcessFragmentResult::Reassembled { buffer: vec, ip_fragment_chain: chain } => {
+                        ip_fragment_chain = Some(chain);
                         buffer = PinnedFrameBuffer::from_vec(vec);
+                        rx_frame_storage = buffer.rx_frame_storage();
 
                         match buffer.parse_mut() {
                             Ok(packet) => (packet, None),
@@ -4090,6 +4132,7 @@ pub fn receive_ipv6_packet<
                 transparent_override: Some(TransparentLocalDelivery { addr, port }),
                 parsing_context,
                 frame_storage: rx_frame_storage.clone(),
+                ip_fragment_chain: ip_fragment_chain.clone(),
             };
 
             // Short-circuit the routing process and override local demux, providing a local
@@ -4163,6 +4206,7 @@ pub fn receive_ipv6_packet<
                     transparent_override: None,
                     parsing_context,
                     frame_storage: rx_frame_storage.clone(),
+                    ip_fragment_chain: ip_fragment_chain.clone(),
                 };
 
                 dispatch_receive_ipv6_packet(
@@ -4231,6 +4275,7 @@ pub fn receive_ipv6_packet<
                         transparent_override: None,
                         parsing_context,
                         frame_storage: rx_frame_storage.clone(),
+                        ip_fragment_chain: ip_fragment_chain.clone(),
                     };
                     dispatch_receive_ipv6_packet(
                         core_ctx,

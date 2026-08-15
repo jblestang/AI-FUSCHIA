@@ -50,6 +50,7 @@ use packet_formats::ip::{IpPacket, Ipv4Proto};
 use packet_formats::ipv4::{Ipv4Header, Ipv4Packet};
 use packet_formats::ipv6::Ipv6Packet;
 use packet_formats::ipv6::ext_hdrs::Ipv6ExtensionHeader;
+use crate::internal::fragment_chain::PacketSegment;
 use zerocopy::{SplitByteSlice, SplitByteSliceMut};
 
 /// An IP extension trait supporting reassembly of fragments.
@@ -163,6 +164,7 @@ pub trait FragmentHandler<I: ReassemblyIpExt, BC> {
         &mut self,
         bindings_ctx: &mut BC,
         packet: I::Packet<B>,
+        wire_fragment: Option<PacketSegment>,
     ) -> FragmentProcessingState<I, B>
     where
         I::Packet<B>: FragmentablePacket;
@@ -177,6 +179,9 @@ pub trait FragmentHandler<I: ReassemblyIpExt, BC> {
     /// `reassemble_packet` as `buffer` where the packet will be reassembled
     /// into.
     ///
+    /// On success, returns the wire IP fragments captured during reassembly (may
+    /// be empty when RX storage was not pinned).
+    ///
     /// # Panics
     ///
     /// Panics if the provided `buffer` does not have enough capacity for the
@@ -189,7 +194,7 @@ pub trait FragmentHandler<I: ReassemblyIpExt, BC> {
         bindings_ctx: &mut BC,
         key: &FragmentCacheKey<I>,
         buffer: BV,
-    ) -> Result<(), FragmentReassemblyError>;
+    ) -> Result<alloc::sync::Arc<[PacketSegment]>, FragmentReassemblyError>;
 }
 
 impl<I: IpExt + ReassemblyIpExt, BC: FragmentBindingsContext, CC: FragmentContext<I, BC>>
@@ -199,12 +204,13 @@ impl<I: IpExt + ReassemblyIpExt, BC: FragmentBindingsContext, CC: FragmentContex
         &mut self,
         bindings_ctx: &mut BC,
         packet: I::Packet<B>,
+        wire_fragment: Option<PacketSegment>,
     ) -> FragmentProcessingState<I, B>
     where
         I::Packet<B>: FragmentablePacket,
     {
         self.with_state_mut(|cache| {
-            let (res, timer_action) = cache.process_fragment(packet);
+            let (res, timer_action) = cache.process_fragment(packet, wire_fragment);
 
             if let Some(timer_action) = timer_action {
                 match timer_action {
@@ -236,7 +242,7 @@ impl<I: IpExt + ReassemblyIpExt, BC: FragmentBindingsContext, CC: FragmentContex
         bindings_ctx: &mut BC,
         key: &FragmentCacheKey<I>,
         buffer: BV,
-    ) -> Result<(), FragmentReassemblyError> {
+    ) -> Result<alloc::sync::Arc<[PacketSegment]>, FragmentReassemblyError> {
         self.with_state_mut(|cache| {
             let res = cache.reassemble_packet(key, buffer);
 
@@ -267,7 +273,7 @@ impl<I: ReassemblyIpExt, BC: FragmentBindingsContext, CC: FragmentContext<I, BC>
             };
 
             // If a timer fired, the `key` must still exist in our fragment cache.
-            let FragmentCacheData { missing_blocks: _, body_fragments, header: _, total_size } =
+            let FragmentCacheData { missing_blocks: _, body_fragments, wire_fragments: _, header: _, total_size } =
                 assert_matches!(cache.remove_data(&key), Some(c) => c);
             debug!(
                 "reassembly for {key:?} \
@@ -415,6 +421,9 @@ struct FragmentCacheData {
     /// [`PacketBodyFragment::new`].
     body_fragments: BinaryHeap<PacketBodyFragment>,
 
+    /// Wire IP fragments as received (sorted by offset at reassembly time).
+    wire_fragments: BinaryHeap<PacketWireFragment>,
+
     /// The header data for the reassembled packet.
     ///
     /// The header of the fragment packet with offset 0 will be used as the
@@ -434,6 +443,7 @@ impl Default for FragmentCacheData {
         FragmentCacheData {
             missing_blocks: core::iter::once(BlockRange { start: 0, end: u16::MAX }).collect(),
             body_fragments: BinaryHeap::new(),
+            wire_fragments: BinaryHeap::new(),
             header: None,
             total_size: 0,
         }
@@ -555,6 +565,7 @@ impl<I: ReassemblyIpExt, BT: FragmentBindingsTypes> IpPacketFragmentCache<I, BT>
     fn process_fragment<B: SplitByteSlice>(
         &mut self,
         packet: I::Packet<B>,
+        wire_fragment: Option<PacketSegment>,
     ) -> (FragmentProcessingState<I, B>, Option<CacheTimerAction<I>>)
     where
         I::Packet<B>: FragmentablePacket,
@@ -780,6 +791,9 @@ impl<I: ReassemblyIpExt, BT: FragmentBindingsTypes> IpPacketFragmentCache<I, BT>
         added_bytes += body.len();
         fragment_data.total_size += added_bytes;
         fragment_data.body_fragments.push(PacketBodyFragment::new(offset, body));
+        if let Some(wire) = wire_fragment {
+            fragment_data.wire_fragments.push(PacketWireFragment::new(offset, wire));
+        }
 
         // If we still have missing fragments, let the caller know that we are
         // still waiting on some fragments. Otherwise, we let them know we are
@@ -817,7 +831,7 @@ impl<I: ReassemblyIpExt, BT: FragmentBindingsTypes> IpPacketFragmentCache<I, BT>
         &mut self,
         key: &FragmentCacheKey<I>,
         buffer: BV,
-    ) -> Result<(), FragmentReassemblyError> {
+    ) -> Result<alloc::sync::Arc<[PacketSegment]>, FragmentReassemblyError> {
         let entry = match self.cache.entry(*key) {
             Entry::Occupied(entry) => entry,
             Entry::Vacant(_) => return Err(FragmentReassemblyError::InvalidKey),
@@ -835,11 +849,20 @@ impl<I: ReassemblyIpExt, BT: FragmentBindingsTypes> IpPacketFragmentCache<I, BT>
         // If we are not missing fragments, we must have header data.
         assert_matches!(data.header, Some(_));
 
+        let wire_chain: alloc::sync::Arc<[PacketSegment]> = data
+            .wire_fragments
+            .into_sorted_vec()
+            .into_iter()
+            .map(|f| f.wire)
+            .collect::<alloc::vec::Vec<_>>()
+            .into();
+
         // TODO(https://github.com/rust-lang/rust/issues/59278): Use
         // `BinaryHeap::into_iter_sorted`.
         let body_fragments = data.body_fragments.into_sorted_vec().into_iter().map(|x| x.data);
         I::Packet::reassemble_fragmented_packet(buffer, data.header.unwrap(), body_fragments)
-            .map_err(|_| FragmentReassemblyError::PacketParsingError)
+            .map_err(|_| FragmentReassemblyError::PacketParsingError)?;
+        Ok(wire_chain)
     }
 
     /// Gets or creates a new entry in the cache for a given `key`.
@@ -901,6 +924,31 @@ fn get_header<B: SplitByteSlice, I: IpExt>(packet: &I::Packet<B>) -> Vec<u8> {
 struct PacketBodyFragment {
     offset: u16,
     data: Vec<u8>,
+}
+
+/// A wire IP fragment as received (full fragment including IP header).
+#[derive(Debug, PartialEq, Eq)]
+struct PacketWireFragment {
+    offset: u16,
+    wire: PacketSegment,
+}
+
+impl PacketWireFragment {
+    fn new(offset: u16, wire: PacketSegment) -> Self {
+        Self { offset, wire }
+    }
+}
+
+impl PartialOrd for PacketWireFragment {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PacketWireFragment {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.offset.cmp(&other.offset)
+    }
 }
 
 impl PacketBodyFragment {
@@ -1118,7 +1166,7 @@ mod tests {
         let packet = buffer.parse::<Ipv4Packet<_>>().unwrap();
 
         let actual_result =
-            FragmentHandler::process_fragment::<&[u8]>(core_ctx, bindings_ctx, packet);
+            FragmentHandler::process_fragment::<&[u8]>(core_ctx, bindings_ctx, packet, None);
         match expected_result {
             ExpectedResult::Ready { body_fragment_blocks, key: expected_key } => {
                 let (key, packet_len) = assert_matches!(
@@ -1170,7 +1218,7 @@ mod tests {
         let packet = buffer.parse::<Ipv6Packet<_>>().unwrap();
 
         let actual_result =
-            FragmentHandler::process_fragment::<&[u8]>(core_ctx, bindings_ctx, packet);
+            FragmentHandler::process_fragment::<&[u8]>(core_ctx, bindings_ctx, packet, None);
         match expected_result {
             ExpectedResult::Ready { body_fragment_blocks, key: expected_key } => {
                 let (key, packet_len) = assert_matches!(
@@ -1319,7 +1367,7 @@ mod tests {
             .unwrap();
         let packet = buffer.parse::<Ipv4Packet<_>>().unwrap();
         assert_matches!(
-            FragmentHandler::process_fragment::<&[u8]>(&mut core_ctx, &mut bindings_ctx, packet),
+            FragmentHandler::process_fragment::<&[u8]>(&mut core_ctx, &mut bindings_ctx, packet, None),
             FragmentProcessingState::NotNeeded(unfragmented) if unfragmented.body() == body
         );
     }
@@ -1341,7 +1389,7 @@ mod tests {
             .unwrap();
         let packet = buffer.parse::<Ipv6Packet<_>>().unwrap();
         assert_matches!(
-            FragmentHandler::process_fragment::<&[u8]>(&mut core_ctx, &mut bindings_ctx, packet),
+            FragmentHandler::process_fragment::<&[u8]>(&mut core_ctx, &mut bindings_ctx, packet, None),
             FragmentProcessingState::InvalidFragment
         );
     }
@@ -1965,7 +2013,7 @@ mod tests {
             .unwrap();
         let packet = buffer.parse::<Ipv4Packet<_>>().unwrap();
         assert_matches!(
-            FragmentHandler::process_fragment::<&[u8]>(&mut core_ctx, &mut bindings_ctx, packet),
+            FragmentHandler::process_fragment::<&[u8]>(&mut core_ctx, &mut bindings_ctx, packet, None),
             FragmentProcessingState::InvalidFragment
         );
 
@@ -1986,7 +2034,7 @@ mod tests {
             .unwrap();
         let packet = buffer.parse::<Ipv4Packet<_>>().unwrap();
         let (key, packet_len) = assert_matches!(
-            FragmentHandler::process_fragment::<&[u8]>(&mut core_ctx, &mut bindings_ctx, packet),
+            FragmentHandler::process_fragment::<&[u8]>(&mut core_ctx, &mut bindings_ctx, packet, None),
             FragmentProcessingState::Ready {key, packet_len} => (key, packet_len)
         );
         assert_eq!(key, test_key(id));
@@ -2040,7 +2088,7 @@ mod tests {
             .unwrap();
         let packet = buffer.parse::<Ipv6Packet<_>>().unwrap();
         assert_matches!(
-            FragmentHandler::process_fragment::<&[u8]>(&mut core_ctx, &mut bindings_ctx, packet),
+            FragmentHandler::process_fragment::<&[u8]>(&mut core_ctx, &mut bindings_ctx, packet, None),
             FragmentProcessingState::InvalidFragment
         );
 
@@ -2060,7 +2108,7 @@ mod tests {
             .unwrap();
         let packet = buffer.parse::<Ipv6Packet<_>>().unwrap();
         let (key, packet_len) = assert_matches!(
-            FragmentHandler::process_fragment::<&[u8]>(&mut core_ctx, &mut bindings_ctx, packet),
+            FragmentHandler::process_fragment::<&[u8]>(&mut core_ctx, &mut bindings_ctx, packet, None),
             FragmentProcessingState::Ready {key, packet_len} => (key, packet_len)
         );
         assert_eq!(key, test_key(id));

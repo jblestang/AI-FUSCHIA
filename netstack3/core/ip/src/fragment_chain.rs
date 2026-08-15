@@ -205,34 +205,84 @@ enum SharedPacketStorage {
 /// Shared packet bytes with layer boundaries for userspace inspection.
 ///
 /// Contiguous RX frames store `Arc<[u8]>` directly (no extra wrapper allocation).
-/// Fragment reassembly uses segmented storage behind the same type.
+/// Reassembled datagrams may also carry an [`Self::ip_fragment_chain`] of original
+/// wire fragments for Layer-7 inspection (e.g. per-fragment TOS).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SharedPacketView {
     storage: SharedPacketStorage,
     layers: LayerRanges,
+    /// Original IP fragments as received (in increasing fragment-offset order).
+    ip_fragment_chain: Option<Arc<[PacketSegment]>>,
 }
 
 impl SharedPacketView {
     /// Builds a view over a single contiguous buffer with layer ranges.
     pub fn contiguous(storage: Arc<[u8]>, layers: LayerRanges) -> Self {
-        Self { storage: SharedPacketStorage::Contiguous(storage), layers }
+        Self::contiguous_with_ip_fragments(storage, layers, None)
+    }
+
+    /// Builds a contiguous logical datagram view, optionally retaining wire IP fragments.
+    pub fn contiguous_with_ip_fragments(
+        storage: Arc<[u8]>,
+        layers: LayerRanges,
+        ip_fragment_chain: Option<Arc<[PacketSegment]>>,
+    ) -> Self {
+        Self {
+            storage: SharedPacketStorage::Contiguous(storage),
+            layers,
+            ip_fragment_chain,
+        }
     }
 
     /// Builds a view from a reassembled fragment chain and layer ranges in logical packet space.
     pub fn from_chain(chain: ReassembledChain, layers: LayerRanges) -> Self {
+        Self::from_chain_with_ip_fragments(chain, layers, None)
+    }
+
+    /// Builds a logical segmented view and attaches the original wire IP fragment chain.
+    pub fn from_chain_with_ip_fragments(
+        chain: ReassembledChain,
+        layers: LayerRanges,
+        ip_fragment_chain: Option<Arc<[PacketSegment]>>,
+    ) -> Self {
         let segments: alloc::vec::Vec<PacketSegment> = chain.segments_in_order().cloned().collect();
-        Self { storage: SharedPacketStorage::Segmented(segments.into()), layers }
+        Self {
+            storage: SharedPacketStorage::Segmented(segments.into()),
+            layers,
+            ip_fragment_chain,
+        }
     }
 
     pub fn layers(&self) -> &LayerRanges {
         &self.layers
     }
 
+    /// Logical reassembly segments (header + body pieces), empty for contiguous storage.
     pub fn segments(&self) -> &[PacketSegment] {
         match &self.storage {
             SharedPacketStorage::Contiguous(_) => &[],
             SharedPacketStorage::Segmented(segments) => segments,
         }
+    }
+
+    /// Wire IP fragments as received, sorted by fragment offset.
+    ///
+    /// `None` for single-frame (non-fragmented) receives. Present when reassembly
+    /// captured pinned RX storage for each fragment.
+    pub fn ip_fragment_chain(&self) -> Option<&[PacketSegment]> {
+        self.ip_fragment_chain.as_deref()
+    }
+
+    /// Returns true when the datagram was delivered from a multi-fragment reassembly.
+    pub fn is_reassembled_from_fragments(&self) -> bool {
+        self.ip_fragment_chain.as_ref().is_some_and(|c| c.len() > 1)
+    }
+
+    /// Raw IPv4 TOS byte (header byte 1) from each wire fragment, when present.
+    pub fn ipv4_fragment_tos_raw(&self) -> impl Iterator<Item = u8> + '_ {
+        self.ip_fragment_chain
+            .iter()
+            .flat_map(|chain| chain.iter().filter_map(|seg| seg.as_slice().get(1).copied()))
     }
 
     /// Invokes `f` with the full stored bytes as a fragmented view (zero-copy).
@@ -354,6 +404,21 @@ mod tests {
         assert_eq!(buf.len(), 25);
     }
 
+    #[test]
+    fn ip_fragment_chain_exposes_wire_segments() {
+        let header = PacketSegment::capture(&[0u8; 20]);
+        let body = PacketSegment::capture(&[1, 2, 3]);
+        let chain: Arc<[PacketSegment]> = Arc::from([header.clone(), body.clone()]);
+        let layers = LayerRanges { ip: 0..23, transport: 20..23, payload: 20..23 };
+        let view = SharedPacketView::contiguous_with_ip_fragments(
+            Arc::from([0u8; 23]),
+            layers,
+            Some(chain),
+        );
+        assert!(view.is_reassembled_from_fragments());
+        assert_eq!(view.ip_fragment_chain().unwrap().len(), 2);
+        assert!(view.segments().is_empty());
+    }
     #[test]
     fn view_of_subslice_rejects_out_of_storage_pointer() {
         let storage = Arc::from([1u8, 2, 3, 4]);

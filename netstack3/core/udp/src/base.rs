@@ -1195,12 +1195,18 @@ impl<I: Ip> UdpRecvDatagram<I> {
         meta: UdpPacketMeta<I>,
         header_info: &H,
         frame_storage: Option<alloc::sync::Arc<[u8]>>,
+        ip_fragment_chain: Option<alloc::sync::Arc<[netstack3_ip::PacketSegment]>>,
         packet: &UdpPacket<&[u8]>,
         parse_meta: packet::ParseMetadata,
     ) -> Self {
         let view = match frame_storage {
             Some(frame) => match transport_start_in_frame(&frame, packet.body(), parse_meta) {
-                Some(start) => shared_packet_view_at_transport_start(frame, start, parse_meta),
+                Some(start) => shared_packet_view_at_transport_start(
+                    frame,
+                    start,
+                    parse_meta,
+                    ip_fragment_chain,
+                ),
                 None => Self::shared_view_from_packet_wire(packet, parse_meta),
             },
             None => Self::shared_view_from_packet_wire(packet, parse_meta),
@@ -1842,6 +1848,7 @@ fn receive_ip_packet_early_demux<
     parsing_context: &mut NetworkParsingContext,
     early_demux_socket: I::DualStackBoundSocketId<CC::WeakDeviceId, Udp<BC>>,
     frame_storage: Option<alloc::sync::Arc<[u8]>>,
+    ip_fragment_chain: Option<alloc::sync::Arc<[netstack3_ip::PacketSegment]>>,
 ) -> Result<(), (B, I::IcmpError)> {
     let Ok(packet) = buffer.parse_with::<_, UdpPacket<_>>(UdpParseArgs::with_context(
         src_ip,
@@ -1871,6 +1878,7 @@ fn receive_ip_packet_early_demux<
         meta,
         header_info,
         frame_storage,
+        ip_fragment_chain,
         &packet,
         parse_meta,
     );
@@ -1914,8 +1922,9 @@ fn receive_ip_packet<
     info: &mut LocalDeliveryPacketInfo<I, H>,
     early_demux_socket: Option<DualStackUdpSocketId<I, CC::WeakDeviceId, BC>>,
 ) -> Result<(), (B, I::IcmpError)> {
-    let LocalDeliveryPacketInfo { meta, header_info, marks: _, frame_storage } = info;
-    let ReceiveIpPacketMeta { broadcast, transparent_override, parsing_context, frame_storage: _ } = meta;
+    let LocalDeliveryPacketInfo { meta, header_info, marks: _, frame_storage, ip_fragment_chain } =
+        info;
+    let ReceiveIpPacketMeta { broadcast, transparent_override, parsing_context, frame_storage: _, ip_fragment_chain: _ } = meta;
 
     trace_duration!("udp::receive_ip_packet");
     trace!("received UDP packet: {:x?}", buffer.as_mut());
@@ -1933,6 +1942,7 @@ fn receive_ip_packet<
             parsing_context,
             early_demux_socket.expect("checked is_some above"),
             frame_storage.take(),
+            ip_fragment_chain.take(),
         );
     }
 
@@ -2038,6 +2048,7 @@ fn receive_ip_packet<
         meta,
         header_info,
         frame_storage.take(),
+        ip_fragment_chain.take(),
         &packet,
         parse_meta,
     );

@@ -172,7 +172,7 @@ fn receive_igmp_packet<
     mut buffer: B,
     info: &LocalDeliveryPacketInfo<Ipv4, H>,
 ) -> Result<(), IgmpError> {
-    let LocalDeliveryPacketInfo { meta: _, header_info, marks: _, frame_storage: _ } = info;
+    let LocalDeliveryPacketInfo { meta: _, header_info, marks: _, frame_storage: _, ip_fragment_chain: _ } = info;
     let dst_ip = dst_ip.into_addr();
     let ttl = header_info.hop_limit();
 

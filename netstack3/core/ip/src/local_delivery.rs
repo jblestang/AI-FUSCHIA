@@ -16,6 +16,8 @@ use packet_formats::ipv4::options::Ipv4Option;
 use packet_formats::ipv6::Ipv6Header as _;
 use packet_formats::ipv6::ext_hdrs::{HopByHopOptionData, Ipv6ExtensionHeader};
 
+use crate::internal::fragment_chain::PacketSegment;
+
 /// Layer-3 receive metadata delivered alongside socket datagrams/segments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IpReceiveMeta {
@@ -63,6 +65,9 @@ pub struct ReceiveIpPacketMeta<I: IpExt> {
 
     /// Pinned RX frame bytes for view-only upper-layer delivery.
     pub frame_storage: Option<Arc<[u8]>>,
+
+    /// Wire IP fragments when the datagram was reassembled from fragments.
+    pub ip_fragment_chain: Option<Arc<[PacketSegment]>>,
 }
 
 /// Information for an incoming packet.
@@ -79,6 +84,8 @@ pub struct LocalDeliveryPacketInfo<I: IpExt, H: IpHeaderInfo<I>> {
     pub marks: Marks,
     /// Shared RX frame bytes; upper layers build range views without copying payload.
     pub frame_storage: Option<Arc<[u8]>>,
+    /// Wire IP fragments when the datagram was reassembled from fragments.
+    pub ip_fragment_chain: Option<Arc<[PacketSegment]>>,
 }
 
 /// Abstracts extracting information from IP headers for upper layers.
@@ -178,6 +185,7 @@ pub(crate) mod testutil {
                 transparent_override: None,
                 parsing_context: NetworkParsingContext::default(),
                 frame_storage: None,
+                ip_fragment_chain: None,
             }
         }
     }
@@ -189,6 +197,7 @@ pub(crate) mod testutil {
                 header_info: Default::default(),
                 marks: Default::default(),
                 frame_storage: None,
+                ip_fragment_chain: None,
             }
         }
     }
