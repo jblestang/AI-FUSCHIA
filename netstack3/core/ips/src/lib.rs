@@ -30,7 +30,9 @@ pub mod benchmarks;
 
 /// Layer 7 analysis helpers (TOS mismatch detection, etc.).
 pub mod analysis;
-pub use analysis::{detect_tos_mismatch, ipv4_dscp_and_ecn, TosMismatch};
+pub use analysis::{
+    detect_rfc5722_overlap, detect_tos_mismatch, ipv4_dscp_and_ecn, Rfc5722Overlap, TosMismatch,
+};
 pub use context::{
     IpsIngressHandler, IpsIngressResult, IpsReceiveBindingsContext, IpsReceiveError,
     TryIntoIpsFrame,

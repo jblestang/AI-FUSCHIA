@@ -32,6 +32,10 @@ netstack3_base = { package = "netstack3-base", path = "../base", features = ["te
 name = "detect_tos_mismatch"
 required-features = ["testutils"]
 
+[[example]]
+name = "detect_ip_overlap"
+required-features = ["testutils"]
+
 [[bench]]
 name = "ips_receive_throughput"
 harness = false
