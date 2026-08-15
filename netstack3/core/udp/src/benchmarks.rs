@@ -92,6 +92,11 @@ pub fn total_wire_bytes(wire_bytes: usize, packet_count: u64) -> u64 {
     wire_bytes as u64 * packet_count
 }
 
+/// Average wall time per packet given batch wall time and packet count.
+pub fn per_packet_duration(batch: core::time::Duration, packet_count: u64) -> core::time::Duration {
+    batch.checked_div(packet_count as u32).unwrap_or(batch)
+}
+
 struct PreparedPacket {
     buffer: Vec<u8>,
     meta: UdpPacketMeta<Ipv4>,
@@ -147,6 +152,10 @@ fn receive_ipv4_udp_packet(
 }
 
 /// Registers UDP receive throughput benchmarks for IPv4 at [`TARGET_GBPS`] Gbps.
+///
+/// For each payload size, registers two Criterion cases:
+/// - `.../bytes` — one iteration processes a full [`BATCH_DURATION`] batch; throughput in MiB/s/GiB/s.
+/// - `.../per-packet` — one iteration receives a single datagram; `time` is wall time per packet (ns/µs).
 pub fn add_udp_receive_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
     for &payload_len in PAYLOAD_SIZES {
         let wire_bytes = ipv4_udp_wire_bytes(payload_len);
@@ -154,11 +163,12 @@ pub fn add_udp_receive_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
         let batch_bytes = total_wire_bytes(wire_bytes, packet_count);
 
         let batch_ms = BATCH_DURATION.as_millis();
-        let bench_name = format!(
+        let base = format!(
             "ipv4/recv/{payload_len}B-payload/{packet_count}pkts/{batch_ms}ms/{TARGET_GBPS:.2}Gbps-target"
         );
+
         group.throughput(Throughput::Bytes(batch_bytes));
-        group.bench_function(bench_name, |bencher| {
+        group.bench_function(format!("{base}/bytes"), |bencher| {
             let mut packet = build_ipv4_udp_packet(payload_len);
             let BenchmarkCtx { mut ctx, early_demux_socket } = setup_connected_benchmark_ctx(&packet);
 
@@ -174,6 +184,23 @@ pub fn add_udp_receive_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
                 }
             });
         });
+
+        group.throughput(Throughput::Elements(1));
+        group.bench_function(format!("{base}/per-packet"), |bencher| {
+            let mut packet = build_ipv4_udp_packet(payload_len);
+            let BenchmarkCtx { mut ctx, early_demux_socket } = setup_connected_benchmark_ctx(&packet);
+
+            bencher.iter(|| {
+                let ctx_pair = ctx.as_mut();
+                receive_ipv4_udp_packet(
+                    ctx_pair.core_ctx,
+                    ctx_pair.bindings_ctx,
+                    &mut packet,
+                    Some(early_demux_socket.clone()),
+                );
+            });
+        });
+
         group.throughput(Throughput::Bytes(1));
     }
 }
@@ -221,6 +248,12 @@ pub fn add_benches(c: &mut Criterion) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn per_packet_duration_divides_batch() {
+        let batch = core::time::Duration::from_nanos(1000);
+        assert_eq!(per_packet_duration(batch, 10), core::time::Duration::from_nanos(100));
+    }
 
     #[test]
     fn packets_for_rate_scales_with_packet_size() {
