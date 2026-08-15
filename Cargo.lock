@@ -553,11 +553,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "netstack3-benchmarks"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "netstack3-base",
+ "netstack3-sync",
+ "netstack3-udp",
+]
+
+[[package]]
 name = "netstack3-core"
 version = "0.1.0"
 dependencies = [
  "assert_matches",
- "criterion",
  "derivative",
  "lock-order",
  "log",

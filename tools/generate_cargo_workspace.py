@@ -65,6 +65,7 @@ WORKSPACE_MEMBERS = [
     "netstack3/core/udp",
     "netstack3/core/icmp_echo",
     "netstack3/core",
+    "netstack3/benchmarks",
 ]
 
 WORKSPACE_TOML = """\

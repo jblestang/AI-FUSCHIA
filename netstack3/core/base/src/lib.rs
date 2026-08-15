@@ -168,8 +168,8 @@ pub mod socketmap {
 
 /// Sync utilities common to netstack3.
 pub mod sync {
-    // Single-threaded variants of sync primitives are available via the
-    // `single-threaded` feature on `netstack3_sync` / `netstack3_base`.
+    // TODO(https://fxbug.dev/42062225): Support single-threaded variants of
+    // types exported from this module.
 
     // Exclusively re-exports from the sync crate.
     pub use netstack3_sync::rc::{
@@ -209,6 +209,8 @@ pub mod testutil {
     };
     pub use addr::{TEST_ADDRS_V4, TEST_ADDRS_V6, TestAddrs, TestDualStackIpExt, TestIpExt};
     pub use benchmarks::{Bencher, TestBencher};
+    #[cfg(benchmark)]
+    pub use benchmarks::RealBencher;
     pub use fake_bindings::FakeBindingsCtx;
     pub use fake_core::FakeCoreCtx;
     pub use fake_network::{
@@ -218,3 +220,13 @@ pub mod testutil {
     pub use monotonic_id::MonotonicIdentifier;
 }
 
+/// Benchmarks defined in the base crate.
+#[cfg(benchmark)]
+pub mod benchmarks {
+    /// Adds benchmarks defined in the base crate to the provided benchmarker.
+    pub fn add_benches(
+        group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    ) {
+        crate::data_structures::token_bucket::benchmarks::add_benches(group)
+    }
+}

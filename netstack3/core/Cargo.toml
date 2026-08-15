@@ -32,15 +32,3 @@ netstack3_udp = { package = "netstack3-udp", path = "udp" }
 packet = { path = "../../libs/packet" }
 packet_formats = { package = "packet_formats", path = "../../libs/packet-formats" }
 zerocopy = { workspace = true, features = ["derive"] }
-
-[dev-dependencies]
-criterion = { workspace = true }
-netstack3_base = { package = "netstack3-base", path = "base", features = ["testutils", "single-threaded"] }
-netstack3_datagram = { package = "netstack3-datagram", path = "datagram", features = ["testutils"] }
-netstack3_filter = { package = "netstack3-filter", path = "filter", features = ["testutils"] }
-netstack3_ip = { package = "netstack3-ip", path = "ip", features = ["testutils"] }
-netstack3_udp = { package = "netstack3-udp", path = "udp", features = ["benches"] }
-
-[[bench]]
-name = "netstack3"
-harness = false

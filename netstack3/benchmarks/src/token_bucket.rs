@@ -1,9 +1,3 @@
-// Copyright 2026 The Fuchsia Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
-
-//! Token bucket Criterion benchmarks.
-
 use core::time::Duration;
 
 use criterion::{BenchmarkGroup, Bencher, measurement::WallTime};
@@ -22,7 +16,6 @@ fn bench_try_take(b: &mut Bencher, enforced_rate: u64, try_rate: u32) {
     });
 }
 
-/// Registers token bucket micro-benchmarks.
 pub fn add_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
     let _ = group.bench_function("TokenBucket/TryTake/Slow", |b| bench_try_take(b, 64, 1));
     let _ = group.bench_function("TokenBucket/TryTake/HalfRate", |b| bench_try_take(b, 64, 32));

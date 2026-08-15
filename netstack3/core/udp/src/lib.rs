@@ -40,6 +40,6 @@ pub use internal::diagnostics::{UdpSocketDiagnosticTuple, UdpSocketDiagnostics};
 
 pub use internal::settings::UdpSettings;
 
-/// UDP receive throughput benchmark support (Criterion registration).
-#[cfg(feature = "benches")]
+/// Throughput benchmarks for the external `netstack3-benchmarks` crate.
+#[cfg(feature = "bench-support")]
 pub mod bench_support;
