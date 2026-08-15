@@ -1272,4 +1272,27 @@ mod tests {
         assert!(flow.fin_c2s);
         assert!(!flow.should_evict());
     }
+
+    #[test]
+    fn e2e_fragmented_tcp_apply_edit_then_server_ack_mangled_on_wire() {
+        const KEEP_LEN: usize = 160;
+        const ORIGINAL_PAYLOAD: usize = 200;
+
+        let mut view = deliver_fragmented_tcp(ORIGINAL_PAYLOAD, 1000);
+        let mut flow = TcpFlowState::default();
+        view.tcp_overwriter(&mut flow, TcpFlowDirection::ClientToServer)
+            .apply_edit(TcpPayloadEdit { keep_len: KEEP_LEN })
+            .expect("fragmented edit");
+
+        let mut server_view = build_tcp_server_segment(&[], 5000, 1080);
+        let tcp_start = server_view.tcp_header().unwrap().header_range.start;
+        let action = server_view
+            .tcp_overwriter(&mut flow, TcpFlowDirection::ServerToClient)
+            .prepare_inbound()
+            .expect("server prepare");
+        assert_eq!(action, TcpForwardAction::Forward);
+
+        let frame = server_view.eth_frames().next().unwrap();
+        assert_eq!(parsed_tcp_ack(frame, tcp_start), 1040);
+    }
 }

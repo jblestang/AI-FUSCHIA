@@ -16,7 +16,7 @@ use packet_formats::ip::{IpProto, Ipv4Proto, Ipv6Proto};
 use packet_formats::ipv4::{Ipv4Header, Ipv4Packet};
 use packet_formats::ipv6::{Ipv6Header, Ipv6Packet};
 
-use crate::context::IpsReceiveBindingsContext;
+use crate::context::{IpsReceiveBindingsContext, IpsReceiveError};
 use crate::fragment::{add_fragment, ipv4_key, store_fragment};
 use crate::state::{
     assembly_metadata, ip_addr_v4, ip_addr_v6, AssemblyProgress, DatagramAssembly, IpsState,
@@ -25,6 +25,34 @@ use crate::view::{
     IpFragmentInfo, IpFragmentMetadata, ReceivedTcpSegmentView, ReceivedUdpDatagramView,
     ReassemblyOutcome, TcpHeaderView, UdpHeaderView, parse_tcp_header,
 };
+
+fn deliver_udp_to_l7<D, BC>(
+    state: &IpsState,
+    bindings_ctx: &mut BC,
+    device_id: &D,
+    view: ReceivedUdpDatagramView,
+) where
+    D: StrongDeviceIdentifier,
+    BC: IpsReceiveBindingsContext<D>,
+{
+    if bindings_ctx.receive_udp_datagram(device_id, view) == Err(IpsReceiveError::QueueFull) {
+        state.record_l7_queue_full();
+    }
+}
+
+fn deliver_tcp_to_l7<D, BC>(
+    state: &IpsState,
+    bindings_ctx: &mut BC,
+    device_id: &D,
+    view: ReceivedTcpSegmentView,
+) where
+    D: StrongDeviceIdentifier,
+    BC: IpsReceiveBindingsContext<D>,
+{
+    if bindings_ctx.receive_tcp_segment(device_id, view) == Err(IpsReceiveError::QueueFull) {
+        state.record_l7_queue_full();
+    }
+}
 
 /// Processes one owned Ethernet frame on the IPS ingress path.
 pub fn process_ethernet_frame<D, BC>(
@@ -97,6 +125,7 @@ where
     if !fragmented {
         return match proto {
             IpProto::Udp => deliver_unfragmented_udp_v4(
+                state,
                 bindings_ctx,
                 device_id,
                 frame,
@@ -107,6 +136,7 @@ where
                 body_start,
             ),
             IpProto::Tcp => deliver_unfragmented_tcp_v4(
+                state,
                 bindings_ctx,
                 device_id,
                 frame,
@@ -133,11 +163,12 @@ where
     match add_fragment(&state.ipv4, key, stored) {
         AssemblyProgress::NeedMore => Ok(()),
         AssemblyProgress::Ready(assembly) => {
-            deliver_assembly_v4(bindings_ctx, device_id, assembly, ReassemblyOutcome::Complete, proto);
+            deliver_assembly_v4(state, bindings_ctx, device_id, assembly, ReassemblyOutcome::Complete, proto);
             Ok(())
         }
         AssemblyProgress::Aborted(assembly) => {
             deliver_assembly_v4(
+                state,
                 bindings_ctx,
                 device_id,
                 assembly,
@@ -193,6 +224,7 @@ fn ipv6_fragment_info(_frame: &[u8], _ip_offset: usize) -> (u16, bool, u32, bool
 }
 
 fn deliver_unfragmented_udp_v4<D, BC>(
+    state: &IpsState,
     bindings_ctx: &mut BC,
     device_id: &D,
     frame: Buf<Vec<u8>>,
@@ -208,6 +240,9 @@ where
 {
     let frame_len = frame.as_ref().len();
     let payload_start = body_start + packet_formats::udp::HEADER_BYTES;
+    if frame_len < payload_start {
+        return Err(frame);
+    }
     let header_range = body_start..payload_start;
 
     let hdr = {
@@ -244,11 +279,12 @@ where
         IpAddr::V4(dst),
     );
 
-    let _ = bindings_ctx.receive_udp_datagram(device_id, view);
+    deliver_udp_to_l7(state, bindings_ctx, device_id, view);
     Ok(())
 }
 
 fn deliver_unfragmented_tcp_v4<D, BC>(
+    state: &IpsState,
     bindings_ctx: &mut BC,
     device_id: &D,
     frame: Buf<Vec<u8>>,
@@ -293,7 +329,7 @@ where
         IpAddr::V4(dst),
     );
 
-    let _ = bindings_ctx.receive_tcp_segment(device_id, view);
+    deliver_tcp_to_l7(state, bindings_ctx, device_id, view);
     Ok(())
 }
 
@@ -353,6 +389,7 @@ where
 }
 
 fn deliver_assembly_v4<D, BC>(
+    state: &IpsState,
     bindings_ctx: &mut BC,
     device_id: &D,
     assembly: DatagramAssembly<Ipv4>,
@@ -363,10 +400,11 @@ fn deliver_assembly_v4<D, BC>(
     BC: IpsReceiveBindingsContext<D>,
 {
     let (src, dst) = ip_addr_v4(assembly.src_ip, assembly.dst_ip);
-    deliver_assembly_impl(bindings_ctx, device_id, assembly, outcome, src, dst, proto);
+    deliver_assembly_impl(state, bindings_ctx, device_id, assembly, outcome, src, dst, proto);
 }
 
 fn deliver_assembly_v6<D, BC>(
+    state: &IpsState,
     bindings_ctx: &mut BC,
     device_id: &D,
     assembly: DatagramAssembly<Ipv6>,
@@ -376,10 +414,11 @@ fn deliver_assembly_v6<D, BC>(
     BC: IpsReceiveBindingsContext<D>,
 {
     let (src, dst) = ip_addr_v6(assembly.src_ip, assembly.dst_ip);
-    deliver_assembly_impl(bindings_ctx, device_id, assembly, outcome, src, dst, IpProto::Udp);
+    deliver_assembly_impl(state, bindings_ctx, device_id, assembly, outcome, src, dst, IpProto::Udp);
 }
 
 fn deliver_assembly_impl<I, D, BC>(
+    state: &IpsState,
     bindings_ctx: &mut BC,
     device_id: &D,
     assembly: DatagramAssembly<I>,
@@ -425,7 +464,7 @@ fn deliver_assembly_impl<I, D, BC>(
                 dst,
             );
             trace!("ips: delivering UDP datagram to L7, outcome={:?}", outcome);
-            let _ = bindings_ctx.receive_udp_datagram(device_id, view);
+            deliver_udp_to_l7(state, bindings_ctx, device_id, view);
         }
         IpProto::Tcp => {
             let (tcp_header, payload_parts) = if outcome == ReassemblyOutcome::Complete {
@@ -443,7 +482,7 @@ fn deliver_assembly_impl<I, D, BC>(
                 dst,
             );
             trace!("ips: delivering TCP segment to L7, outcome={:?}", outcome);
-            let _ = bindings_ctx.receive_tcp_segment(device_id, view);
+            deliver_tcp_to_l7(state, bindings_ctx, device_id, view);
         }
         _ => {}
     }
@@ -627,7 +666,7 @@ mod tests {
         const PAYLOAD_LEN: usize = 200;
         const UDP_TOTAL: usize = 8 + PAYLOAD_LEN;
 
-        let state = IpsState::new();
+        let mut state = IpsState::new();
         let mut handler = Capture { views: Vec::new() };
 
         // Each stream uses a distinct (src_ip, dst_ip, identification, UDP) cache key.
@@ -737,7 +776,7 @@ mod tests {
             }
         }
 
-        let state = IpsState::new();
+        let mut state = IpsState::new();
         let mut handler = TcpCapture { views: Vec::new() };
         process_ethernet_frame(&state, &mut handler, &FakeDeviceId, Buf::new(frame, ..)).unwrap();
 
@@ -746,5 +785,347 @@ mod tests {
         assert!(view.tcp_header().is_some());
         assert_eq!(view.payload_len(), PAYLOAD_LEN);
         assert_eq!(view.tcp_header().unwrap().seq_num, 1000);
+    }
+
+    fn build_ipv4_eth_ip_frame(proto: IpProto, body: Vec<u8>) -> Buf<Vec<u8>> {
+        let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
+        let bytes = match proto {
+            IpProto::Udp => {
+                let udp = UdpPacketBuilder::new(remote(2), DST, Some(REMOTE_PORT), LOCAL_PORT);
+                let ip = packet_formats::ipv4::Ipv4PacketBuilder::new(
+                    remote(2),
+                    DST,
+                    64,
+                    Ipv4Proto::Proto(IpProto::Udp),
+                );
+                Buf::new(body, ..)
+                    .wrap_in(udp)
+                    .wrap_in(ip)
+                    .wrap_in(eth)
+                    .serialize_vec_outer(&mut NetworkSerializationContext::default())
+                    .unwrap()
+                    .into_inner()
+                    .into_inner()
+            }
+            IpProto::Tcp => {
+                let tcp = TcpSegmentBuilder::new(
+                    remote(2),
+                    DST,
+                    REMOTE_PORT,
+                    LOCAL_PORT,
+                    1000,
+                    None,
+                    65535,
+                );
+                let ip = packet_formats::ipv4::Ipv4PacketBuilder::new(
+                    remote(2),
+                    DST,
+                    64,
+                    Ipv4Proto::Proto(IpProto::Tcp),
+                );
+                Buf::new(body, ..)
+                    .wrap_in(tcp)
+                    .wrap_in(ip)
+                    .wrap_in(eth)
+                    .serialize_vec_outer(&mut NetworkSerializationContext::default())
+                    .unwrap()
+                    .into_inner()
+                    .into_inner()
+            }
+            _ => panic!("unsupported proto"),
+        };
+        Buf::new(bytes, ..)
+    }
+
+    fn truncate_frame(mut frame: Buf<Vec<u8>>, new_len: usize) -> Buf<Vec<u8>> {
+        let mut bytes = frame.into_inner();
+        bytes.truncate(new_len);
+        Buf::new(bytes, ..)
+    }
+
+    #[test]
+    fn truncated_udp_ipv4_returns_frame_unhandled() {
+        let frame = truncate_frame(
+            build_ipv4_eth_ip_frame(IpProto::Udp, vec![0u8; 4]),
+            packet_formats::ethernet::ETHERNET_HDR_LEN_NO_TAG + 24,
+        );
+        let state = IpsState::new();
+        let mut handler = Capture { views: Vec::new() };
+        assert!(process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frame).is_err());
+        assert!(handler.views.is_empty());
+    }
+
+    #[test]
+    fn truncated_tcp_ipv4_returns_frame_unhandled() {
+        let frame = truncate_frame(
+            build_ipv4_eth_ip_frame(IpProto::Tcp, vec![0xCC; 32]),
+            packet_formats::ethernet::ETHERNET_HDR_LEN_NO_TAG + 24,
+        );
+        let state = IpsState::new();
+        let mut handler = Capture { views: Vec::new() };
+        assert!(process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frame).is_err());
+    }
+
+    struct QueueFullHandler {
+        tcp_calls: usize,
+        udp_calls: usize,
+        reject_tcp: bool,
+        reject_udp: bool,
+    }
+
+    impl IpsReceiveBindingsContext<FakeDeviceId> for QueueFullHandler {
+        fn receive_udp_datagram(
+            &mut self,
+            _device: &FakeDeviceId,
+            _view: ReceivedUdpDatagramView,
+        ) -> Result<(), IpsReceiveError> {
+            self.udp_calls += 1;
+            if self.reject_udp {
+                Err(IpsReceiveError::QueueFull)
+            } else {
+                Ok(())
+            }
+        }
+
+        fn receive_tcp_segment(
+            &mut self,
+            _device: &FakeDeviceId,
+            _view: ReceivedTcpSegmentView,
+        ) -> Result<(), IpsReceiveError> {
+            self.tcp_calls += 1;
+            if self.reject_tcp {
+                Err(IpsReceiveError::QueueFull)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn l7_queue_full_increments_drop_counter_and_still_consumes_frame() {
+        let frame = build_ipv4_eth_ip_frame(IpProto::Tcp, vec![0xCC; 32]);
+        let mut state = IpsState::new();
+        let mut handler = QueueFullHandler {
+            tcp_calls: 0,
+            udp_calls: 0,
+            reject_tcp: true,
+            reject_udp: false,
+        };
+        process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frame).unwrap();
+        assert_eq!(handler.tcp_calls, 1);
+        assert_eq!(state.l7_queue_full_drops(), 1);
+
+        let udp_frame = build_ipv4_eth_ip_frame(IpProto::Udp, vec![0xDD; 16]);
+        let mut udp_handler = QueueFullHandler {
+            tcp_calls: 0,
+            udp_calls: 0,
+            reject_tcp: false,
+            reject_udp: true,
+        };
+        process_ethernet_frame(&state, &mut udp_handler, &FakeDeviceId, udp_frame).unwrap();
+        assert_eq!(udp_handler.udp_calls, 1);
+        assert_eq!(state.l7_queue_full_drops(), 2);
+    }
+
+    fn build_ipv4_tcp_fragment(
+        fragment_offset: u16,
+        more_fragments: bool,
+        body: Vec<u8>,
+        fragment_id: u16,
+    ) -> Buf<Vec<u8>> {
+        let mut ip = packet_formats::ipv4::Ipv4PacketBuilder::new(
+            remote(2),
+            DST,
+            64,
+            Ipv4Proto::Proto(IpProto::Tcp),
+        );
+        ip.id(fragment_id);
+        ip.mf_flag(more_fragments);
+        ip.fragment_offset(if fragment_offset == 0 {
+            packet_formats::ip::FragmentOffset::ZERO
+        } else {
+            packet_formats::ip::FragmentOffset::new(fragment_offset).expect("valid offset")
+        });
+        let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
+        let bytes = Buf::new(body, ..)
+            .wrap_in(ip)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner();
+        Buf::new(bytes, ..)
+    }
+
+    fn build_server_ack_with_sack(ack: u32, sack_left: u32, sack_right: u32) -> Buf<Vec<u8>> {
+        const TCP_OPTION_KIND_SACK: u8 = 5;
+        const TCP_OPTION_KIND_NOP: u8 = 1;
+
+        let mut tcp = TcpSegmentBuilder::new(DST, remote(2), LOCAL_PORT, REMOTE_PORT, 5000, Some(ack), 65535);
+        let ip = packet_formats::ipv4::Ipv4PacketBuilder::new(
+            DST,
+            remote(2),
+            64,
+            Ipv4Proto::Proto(IpProto::Tcp),
+        );
+        let eth = EthernetFrameBuilder::new(DST_MAC, SRC_MAC, EtherType::Ipv4, 0);
+        let mut frame = Buf::new(vec![0u8; 0], ..)
+            .wrap_in(tcp)
+            .wrap_in(ip)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner();
+
+        let tcp_start =
+            packet_formats::ethernet::ETHERNET_HDR_LEN_NO_TAG + packet_formats::ipv4::HDR_PREFIX_LEN;
+        let mut sack = [0u8; 10];
+        sack[0] = TCP_OPTION_KIND_SACK;
+        sack[1] = 10;
+        sack[2..6].copy_from_slice(&sack_left.to_be_bytes());
+        sack[6..10].copy_from_slice(&sack_right.to_be_bytes());
+        frame.resize(tcp_start + 32, 0);
+        frame[tcp_start + 12] = 0x80; // data offset 32
+        frame[tcp_start + 20..tcp_start + 30].copy_from_slice(&sack);
+        frame[tcp_start + 30] = TCP_OPTION_KIND_NOP;
+        frame[tcp_start + 31] = TCP_OPTION_KIND_NOP;
+        Buf::new(frame, ..)
+    }
+
+    struct TcpInlineEditor<'a> {
+        state: &'a IpsState,
+        client_edits: u64,
+        server_forwards: u64,
+        last_server_ack: Option<u32>,
+        last_sack_left: Option<u32>,
+        last_sack_right: Option<u32>,
+    }
+
+    impl IpsReceiveBindingsContext<FakeDeviceId> for TcpInlineEditor<'_> {
+        fn receive_udp_datagram(
+            &mut self,
+            _device: &FakeDeviceId,
+            _view: ReceivedUdpDatagramView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
+
+        fn receive_tcp_segment(
+            &mut self,
+            _device: &FakeDeviceId,
+            mut view: ReceivedTcpSegmentView,
+        ) -> Result<(), IpsReceiveError> {
+            use crate::tcp_flow::TcpFlowDirection;
+            use crate::tcp_overwrite::{TcpForwardAction, TcpPayloadEdit};
+
+            let hdr = view.tcp_header().expect("tcp header");
+            let is_client_data =
+                hdr.src_port == REMOTE_PORT.get() && hdr.dst_port == LOCAL_PORT.get();
+
+            if is_client_data {
+                const KEEP_LEN: usize = 160;
+                self.state
+                    .with_tcp_overwriter(&mut view, |mut overwriter| {
+                        overwriter
+                            .apply_edit(TcpPayloadEdit { keep_len: KEEP_LEN })
+                            .expect("client edit");
+                    })
+                    .expect("client flow");
+                self.client_edits += 1;
+            } else {
+                let action = self
+                    .state
+                    .with_tcp_overwriter(&mut view, |mut overwriter| overwriter.prepare_inbound())
+                    .expect("server flow")
+                    .expect("server prepare");
+                assert_eq!(action, TcpForwardAction::Forward);
+                let tcp_start = view.tcp_header().unwrap().header_range.start;
+                let frame = view.eth_frames().next().unwrap();
+                self.last_server_ack = Some(u32::from_be_bytes([
+                    frame[tcp_start + 8],
+                    frame[tcp_start + 9],
+                    frame[tcp_start + 10],
+                    frame[tcp_start + 11],
+                ]));
+                self.last_sack_left = Some(u32::from_be_bytes([
+                    frame[tcp_start + 22],
+                    frame[tcp_start + 23],
+                    frame[tcp_start + 24],
+                    frame[tcp_start + 25],
+                ]));
+                self.last_sack_right = Some(u32::from_be_bytes([
+                    frame[tcp_start + 26],
+                    frame[tcp_start + 27],
+                    frame[tcp_start + 28],
+                    frame[tcp_start + 29],
+                ]));
+                self.server_forwards += 1;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn e2e_fragmented_tcp_edit_uses_state_tcp_flows_and_mangles_server_ack_and_sack() {
+        const FRAGMENT_ID: u16 = 0x0077;
+        const ORIGINAL_PAYLOAD: usize = 200;
+        const FRAGMENT_BODY_LEN: usize = 104;
+
+        let tcp = TcpSegmentBuilder::new(
+            remote(2),
+            DST,
+            REMOTE_PORT,
+            LOCAL_PORT,
+            1000,
+            None,
+            65535,
+        );
+        let ip = packet_formats::ipv4::Ipv4PacketBuilder::new(
+            remote(2),
+            DST,
+            64,
+            Ipv4Proto::Proto(IpProto::Tcp),
+        );
+        let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
+        let frame = Buf::new(vec![0xAA; ORIGINAL_PAYLOAD], ..)
+            .wrap_in(tcp)
+            .wrap_in(ip)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner();
+        let body_start =
+            packet_formats::ethernet::ETHERNET_HDR_LEN_NO_TAG + packet_formats::ipv4::HDR_PREFIX_LEN;
+        let ip_body = frame[body_start..].to_vec();
+        let frag0 = build_ipv4_tcp_fragment(0, true, ip_body[..FRAGMENT_BODY_LEN].to_vec(), FRAGMENT_ID);
+        let frag1 = build_ipv4_tcp_fragment(
+            13,
+            false,
+            ip_body[FRAGMENT_BODY_LEN..].to_vec(),
+            FRAGMENT_ID,
+        );
+
+        let mut state = IpsState::new();
+        let mut handler = TcpInlineEditor {
+            state: &state,
+            client_edits: 0,
+            server_forwards: 0,
+            last_server_ack: None,
+            last_sack_left: None,
+            last_sack_right: None,
+        };
+
+        process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frag0).unwrap();
+        process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frag1).unwrap();
+        assert_eq!(handler.client_edits, 1);
+        assert_eq!(state.tcp_flow_count(), 1);
+
+        let server_frame = build_server_ack_with_sack(1080, 1010, 1080);
+        process_ethernet_frame(&state, &mut handler, &FakeDeviceId, server_frame).unwrap();
+
+        assert_eq!(handler.server_forwards, 1);
+        assert_eq!(handler.last_server_ack, Some(1040));
     }
 }
