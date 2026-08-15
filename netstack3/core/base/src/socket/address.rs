@@ -77,7 +77,7 @@ impl<A: IpAddress, W: Witness<A> + ScopeableAddress + Copy, Z> StrictlyZonedAddr
         }
     }
 
-    #[cfg(any(feature = "testutils", feature = "benchmark-harness"))]
+    #[cfg(any(feature = "testutils", feature = "benchmark"))]
     /// Creates the unzoned variant, or panics if the addr's scope needs a zone.
     pub fn new_unzoned_or_panic(addr: W) -> Self {
         Self::new_with_zone(addr, || panic!("addr unexpectedly required a zone."))

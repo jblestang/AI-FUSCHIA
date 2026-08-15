@@ -180,7 +180,7 @@ pub trait SocketOpsFilterBindingContext<D>: TxMetadataBindingsTypes {
     }
 }
 
-#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
 impl<
     TimerId: Debug + PartialEq + Clone + Send + Sync + 'static,
     Event: Debug + 'static,

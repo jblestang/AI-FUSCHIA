@@ -42,7 +42,7 @@ pub type UdpCountersWithoutSocket<I> = IpMarked<I, UdpCountersWithoutSocketInner
 /// The counter type `C` is generic to facilitate testing.
 #[derive(Default, Debug)]
 #[cfg_attr(
-    any(test, feature = "testutils", feature = "benchmark-harness"),
+    any(test, feature = "testutils", feature = "benchmark"),
     derive(PartialEq, netstack3_macros::CounterCollection)
 )]
 pub struct UdpCountersWithoutSocketInner<C = Counter> {
@@ -86,7 +86,7 @@ pub type UdpCountersWithSocket<I> = IpMarked<I, UdpCountersWithSocketInner>;
 /// The counter type `C` is generic to facilitate testing.
 #[derive(Default, Debug)]
 #[cfg_attr(
-    any(test, feature = "testutils", feature = "benchmark-harness"),
+    any(test, feature = "testutils", feature = "benchmark"),
     derive(PartialEq, netstack3_macros::CounterCollection)
 )]
 pub struct UdpCountersWithSocketInner<C = Counter> {

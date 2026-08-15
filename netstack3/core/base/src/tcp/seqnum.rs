@@ -351,7 +351,7 @@ impl UnscaledWindowSize {
     }
 }
 
-#[cfg(any(feature = "testutils", feature = "benchmark-harness"))]
+#[cfg(any(feature = "testutils", feature = "benchmark"))]
 mod testutils {
     use super::*;
 

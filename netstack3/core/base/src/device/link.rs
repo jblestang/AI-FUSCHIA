@@ -74,7 +74,7 @@ pub trait LinkDevice: Device + Debug {
 }
 
 /// Utilities for testing link devices.
-#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
 pub(crate) mod testutil {
     use net_types::BroadcastAddress;
     use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};

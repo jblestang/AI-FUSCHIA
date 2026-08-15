@@ -2603,7 +2603,7 @@ fn is_icmp_error_or_redirect_message<I: IcmpIpExt>(proto: I::Proto, buf: &[u8]) 
 }
 
 /// Test utilities for ICMP.
-#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
 pub(crate) mod testutil {
     use alloc::vec::Vec;
     use net_types::ethernet::Mac;

@@ -182,7 +182,7 @@ impl From<&TimestampOption> for packet_formats::tcp::options::TimestampOption {
     }
 }
 
-#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
 mod testutils {
     use super::*;
 

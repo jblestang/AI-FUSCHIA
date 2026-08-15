@@ -60,7 +60,7 @@ impl<D: WeakDeviceIdentifier> RsTimerId<D> {
     }
 
     /// Create a new [`RsTimerId`] for `device_id`.
-    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark"))]
     pub fn new(device_id: D) -> Self {
         Self { device_id }
     }

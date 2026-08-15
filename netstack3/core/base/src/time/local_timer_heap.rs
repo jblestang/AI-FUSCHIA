@@ -327,7 +327,7 @@ impl<T: Instant, K> PartialOrd for HeapEntry<T, K> {
     }
 }
 
-#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
 mod testutil {
     use core::fmt::Debug;
     use core::ops::RangeBounds;

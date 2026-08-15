@@ -139,7 +139,7 @@ mod resource_token {
     /// Internally the value is stored as `NonZeroU64`. This is an optimization
     /// to save memory when the value is wrapped in `Option` (it allows the
     /// compiler to fit `Option<ResourceToken>` in 8 bytes).
-    #[cfg_attr(any(test, feature = "testutils", feature = "benchmark-harness"), derive(PartialEq, Eq, PartialOrd, Ord))]
+    #[cfg_attr(any(test, feature = "testutils", feature = "benchmark"), derive(PartialEq, Eq, PartialOrd, Ord))]
     #[derive(Clone)]
     pub struct ResourceToken<'a> {
         value: NonZeroU64,

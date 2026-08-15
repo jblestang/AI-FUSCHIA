@@ -96,7 +96,7 @@ impl<I: IpExt, D: WeakDeviceIdentifier, S: DatagramSocketSpec> ReferenceState<I,
     }
 
     /// Provides access to the socket state sidestepping lock ordering.
-    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark"))]
     pub fn state(&self) -> &RwLock<SocketState<I, D, S>> {
         &self.state
     }
@@ -3842,7 +3842,7 @@ where
     }
 
     /// Like [`DatagramApi::create`], but uses default values.
-    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark"))]
     pub fn create_default(&mut self) -> S::SocketId<I, DatagramApiWeakDeviceId<C>>
     where
         S::ExternalData<I>: Default,
@@ -5110,13 +5110,13 @@ where
     }
 
     /// Returns the currently available send buffer space on the socket.
-    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark"))]
     pub fn send_buffer_available(&mut self, id: &DatagramApiSocketId<I, C, S>) -> usize {
         id.borrow().send_buffer.available()
     }
 }
 
-#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
 pub(crate) mod testutil {
     use super::*;
 

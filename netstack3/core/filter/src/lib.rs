@@ -57,7 +57,7 @@ pub use state::{
 };
 
 /// Testing-related utilities for use by other crates.
-#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
 pub mod testutil {
     pub use crate::logic::testutil::NoopImpl;
     pub use crate::packets::testutil::new_filter_egress_ip_packet;

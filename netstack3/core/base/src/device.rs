@@ -178,7 +178,7 @@ impl<S: StrongDeviceIdentifier<Weak = W>, W: WeakDeviceIdentifier<Strong = S>>
     }
 }
 
-#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
 pub(crate) mod testutil {
     use alloc::sync::Arc;
     use core::sync::atomic::AtomicBool;

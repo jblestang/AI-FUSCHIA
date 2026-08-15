@@ -40,7 +40,7 @@ impl<I: Ip, D, BT: IpRoutingBindingsTypes + MatcherBindingsTypes> RulesTable<I, 
     }
 
     /// Gets the mutable reference to the rules vector.
-    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark"))]
     pub fn rules_mut(&mut self) -> &mut Vec<Rule<I, D, BT>> {
         &mut self.rules
     }

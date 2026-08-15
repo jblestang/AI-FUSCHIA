@@ -778,7 +778,7 @@ where
     }
 }
 
-#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
 pub mod testutil {
     use core::marker::PhantomData;
 

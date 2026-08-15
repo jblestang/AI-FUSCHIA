@@ -1058,7 +1058,7 @@ impl<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes>
 impl<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> UdpSocketId<I, D, BT> {
     /// Returns the inner state for this socket, sidestepping locking
     /// mechanisms.
-    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark"))]
     pub fn state(&self) -> &RwLock<UdpSocketState<I, D, BT>> {
         let Self(rc) = self;
         rc.state()
@@ -3053,7 +3053,7 @@ where
     }
 
     /// Returns the currently available send buffer space on the socket.
-    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark"))]
     pub fn send_buffer_available(&mut self, id: &UdpApiSocketId<I, C>) -> usize {
         self.datagram().send_buffer_available(id)
     }

@@ -181,7 +181,7 @@ pub mod sync {
 }
 
 /// Test utilities provided to all crates.
-#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark"))]
 pub mod testutil {
     mod addr;
     mod benchmarks;

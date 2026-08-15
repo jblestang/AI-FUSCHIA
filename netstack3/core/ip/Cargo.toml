@@ -8,9 +8,9 @@ license.workspace = true
 name = "netstack3_ip"
 
 [features]
-testutils = ["instrumented", "benchmark-harness"]
+testutils = ["instrumented", "benchmark"]
 instrumented = []
-benchmark-harness = []
+benchmark = []
 
 [dependencies]
 arrayvec = { workspace = true }

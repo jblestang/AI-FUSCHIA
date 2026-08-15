@@ -8,11 +8,10 @@ license.workspace = true
 name = "netstack3_base"
 
 [features]
-testutils = ["instrumented", "netstack3_sync/testutils", "benchmark-harness", "dep:net_declare", "dep:teststd", "dep:assert_matches", "dep:rand_xorshift"]
+testutils = ["instrumented", "netstack3_sync/testutils", "benchmark", "dep:net_declare", "dep:teststd", "dep:assert_matches", "dep:rand_xorshift"]
 instrumented = ["netstack3_sync/instrumented"]
 single-threaded = ["netstack3_sync/single-threaded"]
-benchmark-harness = ["single-threaded", "netstack3_sync/benchmark-harness", "dep:net_declare", "dep:teststd", "dep:assert_matches", "dep:rand_xorshift"]
-benchmark = ["single-threaded"]
+benchmark = ["single-threaded", "netstack3_sync/benchmark", "dep:net_declare", "dep:teststd", "dep:assert_matches", "dep:rand_xorshift"]
 
 [dependencies]
 arc-swap = { workspace = true }
