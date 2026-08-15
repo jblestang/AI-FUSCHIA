@@ -6,7 +6,9 @@
 //!
 //! v1 scope: **established-flow data only** — [`TcpOverwriter::apply_edit`] rejects
 //! SYN/FIN/RST. SACK block edges are rewritten using reverse-direction stream state;
-//! URG is cleared when the urgent pointer falls outside the kept payload prefix.
+//! URG is cleared when the urgent pointer falls outside the kept payload prefix;
+//! PSH/FIN are cleared when truncation empties the segment payload (FIN-only
+//! segments without truncation keep FIN on the wire).
 
 use internet_checksum::Checksum;
 use net_types::ip::{IpAddr, Ipv4Addr};
@@ -24,6 +26,8 @@ const TCP_ACK_OFFSET: usize = 8;
 const TCP_FLAGS_OFFSET: usize = 13;
 const TCP_URG_OFFSET: usize = 18;
 const TCP_CHECKSUM_OFFSET: usize = 16;
+const TCP_FLAG_FIN: u8 = 0x01;
+const TCP_FLAG_PSH: u8 = 0x08;
 const TCP_FLAG_URG: u8 = 0x20;
 const TCP_OPTION_KIND_NOP: u8 = 1;
 const TCP_OPTION_KIND_SACK_PERMITTED: u8 = 4;
@@ -184,7 +188,12 @@ impl<'a> TcpOverwriter<'a> {
                     .copy_from_slice(&a.to_be_bytes());
             }
         }
-        adjust_urg_pointer(buf, tcp_start, wire_payload_len);
+        adjust_tcp_flags_after_truncate(
+            buf,
+            tcp_start,
+            wire_payload_len,
+            removing_from_this_segment > 0,
+        );
         if self.flow.has_mangling() || removing_from_this_segment > 0 {
             rewrite_sack_options(
                 buf,
@@ -368,25 +377,39 @@ fn compute_ipv4_header_checksum(header_prefix: &[u8]) -> [u8; 2] {
     checksum.checksum()
 }
 
-/// Clears URG when the urgent pointer targets bytes removed by prefix-keep truncation.
+/// Adjusts TCP flags after prefix-keep truncation.
 ///
-/// The urgent pointer is **segment-relative** (offset from seq); it is not shifted when
-/// only seq/ack are mangled. After payload truncation, clear URG if the pointer is
-/// at or beyond the kept payload length.
-fn adjust_urg_pointer(buf: &mut [u8], tcp_start: usize, payload_len: usize) {
-    let flags = buf[tcp_start + TCP_FLAGS_OFFSET];
-    if flags & TCP_FLAG_URG == 0 {
-        return;
+/// URG is cleared when the urgent pointer targets bytes removed by truncation. The urgent
+/// pointer is **segment-relative** (offset from seq); it is not shifted when only seq/ack
+/// are mangled.
+///
+/// PSH and FIN are cleared only when this operation truncated payload to empty. Genuine
+/// FIN-only segments (no truncation) keep FIN so peers still observe graceful close.
+fn adjust_tcp_flags_after_truncate(
+    buf: &mut [u8],
+    tcp_start: usize,
+    payload_len: usize,
+    payload_was_truncated: bool,
+) {
+    let mut flags = buf[tcp_start + TCP_FLAGS_OFFSET];
+
+    if flags & TCP_FLAG_URG != 0 {
+        let urg_ptr = u16::from_be_bytes([
+            buf[tcp_start + TCP_URG_OFFSET],
+            buf[tcp_start + TCP_URG_OFFSET + 1],
+        ]);
+        if payload_len == 0 || usize::from(urg_ptr) >= payload_len {
+            flags &= !TCP_FLAG_URG;
+            buf[tcp_start + TCP_URG_OFFSET] = 0;
+            buf[tcp_start + TCP_URG_OFFSET + 1] = 0;
+        }
     }
-    let urg_ptr = u16::from_be_bytes([
-        buf[tcp_start + TCP_URG_OFFSET],
-        buf[tcp_start + TCP_URG_OFFSET + 1],
-    ]);
-    if payload_len == 0 || usize::from(urg_ptr) >= payload_len {
-        buf[tcp_start + TCP_FLAGS_OFFSET] = flags & !TCP_FLAG_URG;
-        buf[tcp_start + TCP_URG_OFFSET] = 0;
-        buf[tcp_start + TCP_URG_OFFSET + 1] = 0;
+
+    if payload_was_truncated && payload_len == 0 {
+        flags &= !(TCP_FLAG_PSH | TCP_FLAG_FIN);
     }
+
+    buf[tcp_start + TCP_FLAGS_OFFSET] = flags;
 }
 
 /// Rewrites SACK block sequence edges using reverse-direction mangling state.
@@ -575,6 +598,10 @@ mod tests {
             frame[tcp_start + TCP_ACK_OFFSET + 2],
             frame[tcp_start + TCP_ACK_OFFSET + 3],
         ])
+    }
+
+    fn parsed_tcp_flags(frame: &[u8], tcp_start: usize) -> u8 {
+        frame[tcp_start + TCP_FLAGS_OFFSET]
     }
 
     fn assert_wire_fields_and_zero_checksums(
@@ -1168,29 +1195,69 @@ mod tests {
     }
 
     #[test]
-    fn adjust_urg_pointer_clears_urg_when_past_kept_payload() {
+    fn adjust_tcp_flags_after_truncate_clears_urg_when_past_kept_payload() {
         let tcp_start = 50usize;
         let mut frame = vec![0u8; 80];
         frame[tcp_start + 13] = 0x30; // ACK + URG
         frame[tcp_start + 18] = 0;
         frame[tcp_start + 19] = 40; // urgent pointer at byte 40
 
-        adjust_urg_pointer(&mut frame, tcp_start, 32);
+        adjust_tcp_flags_after_truncate(&mut frame, tcp_start, 32, true);
         assert_eq!(frame[tcp_start + 13] & TCP_FLAG_URG, 0);
         assert_eq!([frame[tcp_start + 18], frame[tcp_start + 19]], [0, 0]);
     }
 
     #[test]
-    fn adjust_urg_pointer_keeps_urg_inside_kept_prefix() {
+    fn adjust_tcp_flags_after_truncate_keeps_urg_inside_kept_prefix() {
         let tcp_start = 50usize;
         let mut frame = vec![0u8; 80];
         frame[tcp_start + 13] = 0x30;
         frame[tcp_start + 18] = 0;
         frame[tcp_start + 19] = 16;
 
-        adjust_urg_pointer(&mut frame, tcp_start, 32);
+        adjust_tcp_flags_after_truncate(&mut frame, tcp_start, 32, true);
         assert_ne!(frame[tcp_start + 13] & TCP_FLAG_URG, 0);
         assert_eq!([frame[tcp_start + 18], frame[tcp_start + 19]], [0, 16]);
+    }
+
+    #[test]
+    fn adjust_tcp_flags_after_truncate_clears_psh_and_fin_when_payload_emptied() {
+        let tcp_start = 50usize;
+        let mut frame = vec![0u8; 80];
+        frame[tcp_start + 13] = TCP_FLAG_FIN | TCP_FLAG_PSH | 0x10; // FIN + PSH + ACK
+
+        adjust_tcp_flags_after_truncate(&mut frame, tcp_start, 0, true);
+        let flags = frame[tcp_start + 13];
+        assert_eq!(flags & TCP_FLAG_FIN, 0);
+        assert_eq!(flags & TCP_FLAG_PSH, 0);
+        assert_ne!(flags & 0x10, 0, "ACK must be preserved");
+    }
+
+    #[test]
+    fn adjust_tcp_flags_after_truncate_preserves_fin_without_truncation() {
+        let tcp_start = 50usize;
+        let mut frame = vec![0u8; 80];
+        frame[tcp_start + 13] = TCP_FLAG_FIN | 0x10; // FIN + ACK
+
+        adjust_tcp_flags_after_truncate(&mut frame, tcp_start, 0, false);
+        assert_ne!(frame[tcp_start + 13] & TCP_FLAG_FIN, 0);
+    }
+
+    #[test]
+    fn apply_edit_clears_psh_when_payload_truncated_to_empty() {
+        let mut view = build_tcp_segment(&[0xAA; 64], 1000);
+        let tcp_start = view.tcp_header().unwrap().header_range.start;
+        if let Some(buf) = view.eth_frame_buf_mut(0) {
+            buf[tcp_start + 13] |= TCP_FLAG_PSH;
+        }
+
+        let mut flow = TcpFlowState::default();
+        view.tcp_overwriter(&mut flow, TcpFlowDirection::ClientToServer)
+            .apply_edit(TcpPayloadEdit { keep_len: 0 })
+            .expect("drop all payload");
+
+        let frame = view.eth_frames().next().unwrap();
+        assert_eq!(frame[tcp_start + 13] & TCP_FLAG_PSH, 0);
     }
 
     #[test]
@@ -1271,6 +1338,13 @@ mod tests {
             .expect("forward FIN");
         assert!(flow.fin_c2s);
         assert!(!flow.should_evict());
+        let frame = view.eth_frames().next().unwrap();
+        let tcp_start = view.tcp_header().unwrap().header_range.start;
+        assert_ne!(
+            parsed_tcp_flags(frame, tcp_start) & TCP_FLAG_FIN,
+            0,
+            "FIN-only segment must keep FIN on the wire"
+        );
     }
 
     #[test]
