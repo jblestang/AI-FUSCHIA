@@ -12,9 +12,11 @@
 //! IP fragment reassembly follows RFC 5722: overlapping fragments abort
 //! reassembly and are surfaced via [`IpFragmentMetadata`].
 
-#![no_std]
+#![cfg_attr(not(feature = "benchmark"), no_std)]
 #![warn(missing_docs)]
 
+#[cfg(feature = "benchmark")]
+extern crate std;
 extern crate alloc;
 
 mod context;
@@ -22,6 +24,9 @@ mod fragment;
 mod receive;
 mod state;
 mod view;
+
+#[cfg(feature = "benchmark")]
+pub mod benchmarks;
 
 pub use context::{
     IpsIngressHandler, IpsIngressResult, IpsReceiveBindingsContext, IpsReceiveError,

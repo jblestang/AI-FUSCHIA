@@ -10,11 +10,11 @@ use core::ops::Range;
 use log::trace;
 use net_types::ip::{Ip, IpAddr, Ipv4, Ipv6};
 use netstack3_base::StrongDeviceIdentifier;
-use packet::{Buf, Buffer as _, GrowBuffer as _, ParseBuffer as _, ParsablePacket, ShrinkBuffer as _};
+use packet::{Buf, Buffer as _, GrowBuffer as _, ParsablePacket};
 use packet_formats::ethernet::{EtherType, EthernetFrame, EthernetFrameLengthCheck};
 use packet_formats::ip::{IpProto, Ipv4Proto, Ipv6Proto};
-use packet_formats::ipv4::{Ipv4Header, Ipv4Packet};
-use packet_formats::ipv6::{Ipv6Header, Ipv6Packet};
+use packet_formats::ipv4::Ipv4Packet;
+use packet_formats::ipv6::Ipv6Packet;
 
 use crate::context::IpsReceiveBindingsContext;
 use crate::fragment::{add_fragment, ipv4_key, store_fragment};
@@ -64,21 +64,20 @@ where
     D: StrongDeviceIdentifier,
     BC: IpsReceiveBindingsContext<D>,
 {
-    let mut ip_buf = frame;
-    ip_buf.shrink_front(ip_offset);
+    let mut ip_bytes = &frame.as_ref()[ip_offset..];
     let (src, dst, id, offset, mf, ip_packet_end, body_start) = {
-        let packet = match ip_buf.parse::<Ipv4Packet<_>>() {
+        let packet = match Ipv4Packet::parse(&mut ip_bytes, ()) {
             Ok(p) => p,
-            Err(_) => return Err(restore_full_frame(ip_buf, ip_offset)),
+            Err(_) => return Err(frame),
         };
 
         if !matches!(packet.proto(), Ipv4Proto::Proto(IpProto::Udp)) {
-            return Err(restore_full_frame(ip_buf, ip_offset));
+            return Err(frame);
         }
 
         let meta = ParsablePacket::parse_metadata(&packet);
         let ip_packet_end = ip_offset + meta.header_len() + meta.body_len();
-        let body_start = ip_packet_end - meta.body_len();
+        let body_start = ip_offset + meta.header_len();
         (
             packet.src_ip(),
             packet.dst_ip(),
@@ -96,7 +95,7 @@ where
         return deliver_unfragmented_v4(
             bindings_ctx,
             device_id,
-            ip_buf,
+            frame,
             ip_offset,
             src,
             dst,
@@ -105,7 +104,6 @@ where
         );
     }
 
-    let frame = restore_full_frame(ip_buf, ip_offset);
     let stored = store_fragment(
         frame,
         ip_offset..ip_packet_end,
@@ -134,11 +132,6 @@ where
     }
 }
 
-fn restore_full_frame(mut ip_buf: Buf<Vec<u8>>, ip_offset: usize) -> Buf<Vec<u8>> {
-    ip_buf.grow_front(ip_offset);
-    ip_buf
-}
-
 fn process_ipv6<D, BC>(
     _state: &IpsState,
     bindings_ctx: &mut BC,
@@ -151,18 +144,17 @@ where
     BC: IpsReceiveBindingsContext<D>,
 {
     let is_fragment = ipv6_fragment_info(frame.as_ref(), ip_offset).3;
-    let mut ip_buf = frame;
-    ip_buf.shrink_front(ip_offset);
+    let mut ip_bytes = &frame.as_ref()[ip_offset..];
     let (src, dst, body_start) = {
-        let packet = match ip_buf.parse::<Ipv6Packet<_>>() {
+        let packet = match Ipv6Packet::parse(&mut ip_bytes, ()) {
             Ok(p) => p,
-            Err(_) => return Err(restore_full_frame(ip_buf, ip_offset)),
+            Err(_) => return Err(frame),
         };
 
         let is_udp = matches!(packet.proto(), Ipv6Proto::Proto(IpProto::Udp)) || is_fragment;
 
         if !is_udp {
-            return Err(restore_full_frame(ip_buf, ip_offset));
+            return Err(frame);
         }
 
         let src = packet.src_ip();
@@ -172,10 +164,10 @@ where
     };
 
     if is_fragment {
-        return Err(restore_full_frame(ip_buf, ip_offset));
+        return Err(frame);
     }
 
-    deliver_unfragmented_v6(bindings_ctx, device_id, ip_buf, ip_offset, src, dst, body_start)
+    deliver_unfragmented_v6(bindings_ctx, device_id, frame, ip_offset, src, dst, body_start)
 }
 
 fn ipv6_fragment_info(_frame: &[u8], _ip_offset: usize) -> (u16, bool, u32, bool) {
@@ -186,7 +178,7 @@ fn ipv6_fragment_info(_frame: &[u8], _ip_offset: usize) -> (u16, bool, u32, bool
 fn deliver_unfragmented_v4<D, BC>(
     bindings_ctx: &mut BC,
     device_id: &D,
-    ip_buf: Buf<Vec<u8>>,
+    frame: Buf<Vec<u8>>,
     ip_offset: usize,
     src: net_types::ip::Ipv4Addr,
     dst: net_types::ip::Ipv4Addr,
@@ -197,7 +189,6 @@ where
     D: StrongDeviceIdentifier,
     BC: IpsReceiveBindingsContext<D>,
 {
-    let frame = restore_full_frame(ip_buf, ip_offset);
     let frame_len = frame.as_ref().len();
     let payload_start = body_start + packet_formats::udp::HEADER_BYTES;
     let header_range = body_start..payload_start;
@@ -243,7 +234,7 @@ where
 fn deliver_unfragmented_v6<D, BC>(
     bindings_ctx: &mut BC,
     device_id: &D,
-    ip_buf: Buf<Vec<u8>>,
+    frame: Buf<Vec<u8>>,
     ip_offset: usize,
     src: net_types::ip::Ipv6Addr,
     dst: net_types::ip::Ipv6Addr,
@@ -253,7 +244,6 @@ where
     D: StrongDeviceIdentifier,
     BC: IpsReceiveBindingsContext<D>,
 {
-    let frame = restore_full_frame(ip_buf, ip_offset);
     let frame_len = frame.as_ref().len();
     let payload_start = body_start + packet_formats::udp::HEADER_BYTES;
     let header_range = body_start..payload_start;
