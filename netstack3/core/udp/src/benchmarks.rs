@@ -21,7 +21,44 @@ use crate::internal::base::testutils::{
     BaseTestIpExt as _, FakeUdpBindingsCtx, UdpFakeDeviceCoreCtx, UdpFakeDeviceCtx, local_ip,
     remote_ip,
 };
-use crate::internal::base::{DualStackUdpSocketId, UdpApi, UdpIpTransportContext, UdpPacketMeta};
+use crate::internal::base::{DualStackUdpSocketId, UdpApi, UdpIpTransportContext, UdpPacketMeta, UdpRemotePort};
+
+struct BenchmarkCtx {
+    ctx: UdpFakeDeviceCtx,
+    early_demux_socket: DualStackUdpSocketId<
+        Ipv4,
+        netstack3_base::testutil::FakeWeakDeviceId<FakeDeviceId>,
+        FakeUdpBindingsCtx<FakeDeviceId>,
+    >,
+}
+
+/// Creates a connected UDP socket and caches early demux for the benchmark traffic.
+fn setup_connected_benchmark_ctx(packet: &PreparedPacket) -> BenchmarkCtx {
+    let mut ctx = UdpFakeDeviceCtx::with_core_ctx(UdpFakeDeviceCoreCtx::new_fake_device::<Ipv4>());
+    let mut api = UdpApi::<Ipv4, _>::new(ctx.as_mut());
+    let socket = api.create();
+    api.listen(&socket, Some(ZonedAddr::Unzoned(local_ip::<Ipv4>())), Some(LOCAL_PORT))
+        .expect("listen failed");
+    api.connect(
+        &socket,
+        Some(ZonedAddr::Unzoned(remote_ip::<Ipv4>())),
+        UdpRemotePort::from(REMOTE_PORT),
+    )
+    .expect("connect failed");
+
+    let UdpPacketMeta { src_ip, dst_ip, .. } = packet.meta;
+    let early_demux_socket =
+        <UdpIpTransportContext as IpTransportContext<Ipv4, _, _>>::early_demux(
+            ctx.as_mut().core_ctx,
+            &FakeDeviceId,
+            src_ip,
+            dst_ip,
+            packet.buffer.as_ref(),
+        )
+        .expect("early_demux must resolve connected socket for benchmark traffic");
+
+    BenchmarkCtx { ctx, early_demux_socket }
+}
 
 /// Target receive rate for the benchmark (1 Gbps).
 pub const TARGET_GBPS: f64 = 1.0;
@@ -122,21 +159,7 @@ pub fn add_udp_receive_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
         group.throughput(Throughput::Bytes(batch_bytes));
         group.bench_function(bench_name, |bencher| {
             let mut packet = build_ipv4_udp_packet(payload_len);
-            let mut ctx = UdpFakeDeviceCtx::with_core_ctx(UdpFakeDeviceCoreCtx::new_fake_device::<Ipv4>());
-            let mut api = UdpApi::<Ipv4, _>::new(ctx.as_mut());
-            let _socket = api.create();
-            api.listen(&_socket, Some(ZonedAddr::Unzoned(local_ip::<Ipv4>())), Some(LOCAL_PORT))
-                .expect("listen failed");
-
-            let UdpPacketMeta { src_ip, dst_ip, .. } = packet.meta;
-            let early_demux_socket =
-                <UdpIpTransportContext as IpTransportContext<Ipv4, _, _>>::early_demux(
-                    ctx.as_mut().core_ctx,
-                    &FakeDeviceId,
-                    src_ip,
-                    dst_ip,
-                    packet.buffer.as_ref(),
-                );
+            let BenchmarkCtx { mut ctx, early_demux_socket } = setup_connected_benchmark_ctx(&packet);
 
             bencher.iter(|| {
                 let ctx_pair = ctx.as_mut();
@@ -145,7 +168,7 @@ pub fn add_udp_receive_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
                         ctx_pair.core_ctx,
                         ctx_pair.bindings_ctx,
                         &mut packet,
-                        early_demux_socket.clone(),
+                        Some(early_demux_socket.clone()),
                     );
                 }
             });
@@ -164,21 +187,7 @@ pub fn profile_hot_loop(payload_len: usize, batches: Option<u64>) {
     let packet_count = packets_for_rate(wire_bytes, BATCH_DURATION);
 
     let mut packet = build_ipv4_udp_packet(payload_len);
-    let mut ctx = UdpFakeDeviceCtx::with_core_ctx(UdpFakeDeviceCoreCtx::new_fake_device::<Ipv4>());
-    let mut api = UdpApi::<Ipv4, _>::new(ctx.as_mut());
-    let _socket = api.create();
-    api.listen(&_socket, Some(ZonedAddr::Unzoned(local_ip::<Ipv4>())), Some(LOCAL_PORT))
-        .expect("listen failed");
-
-    let UdpPacketMeta { src_ip, dst_ip, .. } = packet.meta;
-    let early_demux_socket =
-        <UdpIpTransportContext as IpTransportContext<Ipv4, _, _>>::early_demux(
-            ctx.as_mut().core_ctx,
-            &FakeDeviceId,
-            src_ip,
-            dst_ip,
-            packet.buffer.as_ref(),
-        );
+    let BenchmarkCtx { mut ctx, early_demux_socket } = setup_connected_benchmark_ctx(&packet);
 
     let mut batch = 0u64;
     loop {
@@ -192,7 +201,7 @@ pub fn profile_hot_loop(payload_len: usize, batches: Option<u64>) {
                 ctx_pair.core_ctx,
                 ctx_pair.bindings_ctx,
                 &mut packet,
-                early_demux_socket.clone(),
+                Some(early_demux_socket.clone()),
             );
         }
     }
@@ -229,27 +238,14 @@ mod tests {
         let wire_bytes = ipv4_udp_wire_bytes(payload_len);
         let packet_count = packets_for_rate(wire_bytes, core::time::Duration::from_millis(1)).min(32);
         let mut packet = build_ipv4_udp_packet(payload_len);
-        let mut ctx = UdpFakeDeviceCtx::with_core_ctx(UdpFakeDeviceCoreCtx::new_fake_device::<Ipv4>());
-        let mut api = UdpApi::<Ipv4, _>::new(ctx.as_mut());
-        let socket = api.create();
-        api.listen(&socket, Some(ZonedAddr::Unzoned(local_ip::<Ipv4>())), Some(LOCAL_PORT))
-            .expect("listen failed");
-        let UdpPacketMeta { src_ip, dst_ip, .. } = packet.meta;
-        let early_demux_socket =
-            <UdpIpTransportContext as IpTransportContext<Ipv4, _, _>>::early_demux(
-                ctx.as_mut().core_ctx,
-                &FakeDeviceId,
-                src_ip,
-                dst_ip,
-                packet.buffer.as_ref(),
-            );
+        let BenchmarkCtx { mut ctx, early_demux_socket } = setup_connected_benchmark_ctx(&packet);
         let ctx_pair = ctx.as_mut();
         for _ in 0..packet_count {
             receive_ipv4_udp_packet(
                 ctx_pair.core_ctx,
                 ctx_pair.bindings_ctx,
                 &mut packet,
-                early_demux_socket.clone(),
+                Some(early_demux_socket.clone()),
             );
         }
     }
