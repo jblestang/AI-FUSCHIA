@@ -89,12 +89,17 @@ impl<'a> TcpOverwriter<'a> {
             InboundSegmentClass::RetransmitKeptPrefix => {
                 let keep = self.flow.retrim_keep_len(self.direction, raw_seq, payload_len as u32);
                 self.truncate_payload(keep as usize)?;
-                self.patch_headers_only(raw_seq, ack_flag, Some(raw_ack))?;
+                self.patch_headers_only(raw_seq, ack_flag, Some(raw_ack), 0)?;
                 Ok(TcpForwardAction::Forward)
             }
             InboundSegmentClass::OutOfOrderHold => Ok(TcpForwardAction::Suppressed),
             InboundSegmentClass::NewData => {
-                self.patch_headers_only(raw_seq, ack_flag, if ack_flag { Some(raw_ack) } else { None })?;
+                self.patch_headers_only(
+                    raw_seq,
+                    ack_flag,
+                    if ack_flag { Some(raw_ack) } else { None },
+                    0,
+                )?;
                 Ok(TcpForwardAction::Forward)
             }
         }
@@ -112,9 +117,10 @@ impl<'a> TcpOverwriter<'a> {
             });
         }
         self.truncate_payload(edit.keep_len)?;
+        let removed = (payload_len_u32).saturating_sub(edit.keep_len as u32);
+        self.patch_headers_only(raw_seq, ack_flag, Some(raw_ack), removed)?;
         self.flow
             .apply_keep_edit(self.direction, raw_seq, payload_len_u32, edit.keep_len as u32);
-        self.patch_headers_only(raw_seq, ack_flag, Some(raw_ack))?;
         Ok(())
     }
 
@@ -132,14 +138,19 @@ impl<'a> TcpOverwriter<'a> {
         Ok(())
     }
 
+    /// Bytes removed from this segment in the current operation; excluded from
+    /// seq mangling so the edited segment keeps its original start seq.
     fn patch_headers_only(
         &mut self,
         raw_seq: u32,
         ack_flag: bool,
         raw_ack: Option<u32>,
+        removing_from_this_segment: u32,
     ) -> Result<(), TcpOverwriteError> {
         let tcp_hdr = self.view.tcp_header().expect("validated").clone();
-        let (seq, ack) =
+        let delta = self.flow.direction_delta(self.direction);
+        let seq = raw_seq.wrapping_sub(delta.saturating_sub(removing_from_this_segment));
+        let (_, ack) =
             self.flow.translate_outbound(self.direction, raw_seq, raw_ack, ack_flag);
         let frame_index = tcp_hdr.eth_frame_index;
         let buf = self
@@ -393,6 +404,89 @@ mod tests {
             LOCAL.into(),
             REMOTE.into(),
         )
+    }
+
+    fn parsed_ipv4_fields(frame: &[u8]) -> (u16, bool, u16) {
+        let ip_offset = ETHERNET_HDR_LEN_NO_TAG;
+        let ip_total = u16::from_be_bytes([
+            frame[ip_offset + IPV4_TOTAL_LEN_OFFSET],
+            frame[ip_offset + IPV4_TOTAL_LEN_OFFSET + 1],
+        ]);
+        let flags_frag = u16::from_be_bytes([
+            frame[ip_offset + IPV4_FLAGS_FRAG_OFFSET],
+            frame[ip_offset + IPV4_FLAGS_FRAG_OFFSET + 1],
+        ]);
+        let mf = flags_frag & 0x2000 != 0;
+        let frag_off = flags_frag & 0x1FFF;
+        (ip_total, mf, frag_off)
+    }
+
+    fn parsed_tcp_seq(frame: &[u8], tcp_start: usize) -> u32 {
+        u32::from_be_bytes([
+            frame[tcp_start + TCP_SEQ_OFFSET],
+            frame[tcp_start + TCP_SEQ_OFFSET + 1],
+            frame[tcp_start + TCP_SEQ_OFFSET + 2],
+            frame[tcp_start + TCP_SEQ_OFFSET + 3],
+        ])
+    }
+
+    fn parsed_tcp_data_offset(frame: &[u8], tcp_start: usize) -> u8 {
+        (frame[tcp_start + 12] >> 4) * 4
+    }
+
+    #[test]
+    fn apply_edit_backpropagates_ipv4_total_len_and_checksums() {
+        const ORIGINAL_PAYLOAD: usize = 80;
+        const KEEP_LEN: usize = 40;
+        const EXPECTED_IP_TOTAL: u16 = 80; // 20 IPv4 + 20 TCP hdr + 40 payload
+
+        let mut view = build_tcp_segment(&[0xAA; ORIGINAL_PAYLOAD], 1000);
+        let tcp_start = view.tcp_header().unwrap().header_range.start;
+        let data_offset_before = parsed_tcp_data_offset(view.eth_frames().next().unwrap(), tcp_start);
+
+        let mut flow = TcpFlowState::default();
+        view.tcp_overwriter(&mut flow, TcpFlowDirection::ClientToServer)
+            .apply_edit(TcpPayloadEdit { keep_len: KEEP_LEN })
+            .expect("edit");
+
+        let frame = view.eth_frames().next().unwrap();
+        let (ip_total, mf, frag_off) = parsed_ipv4_fields(frame);
+        assert_eq!(ip_total, EXPECTED_IP_TOTAL, "IPv4 total length must shrink with payload");
+        assert!(!mf, "MF must be clear on consolidated segment");
+        assert_eq!(frag_off, 0, "IP fragment offset must be zero");
+        assert_eq!(
+            parsed_tcp_data_offset(frame, tcp_start),
+            data_offset_before,
+            "TCP data offset unchanged when only payload shrinks"
+        );
+        assert_eq!(
+            [
+                frame[tcp_start + TCP_CHECKSUM_OFFSET],
+                frame[tcp_start + TCP_CHECKSUM_OFFSET + 1],
+            ],
+            [0, 0],
+            "TCP checksum zeroed for NIC offload"
+        );
+        let ip_offset = ETHERNET_HDR_LEN_NO_TAG;
+        assert_eq!(
+            [
+                frame[ip_offset + IPV4_HDR_CHECKSUM_OFFSET],
+                frame[ip_offset + IPV4_HDR_CHECKSUM_OFFSET + 1],
+            ],
+            [0, 0],
+            "IPv4 header checksum zeroed for NIC offload"
+        );
+        assert_eq!(
+            frame.len(),
+            ETHERNET_HDR_LEN_NO_TAG + usize::from(EXPECTED_IP_TOTAL),
+            "frame buffer truncated to wire length"
+        );
+        assert_eq!(
+            parsed_tcp_seq(frame, tcp_start),
+            1000,
+            "edited segment keeps original start seq"
+        );
+        assert_eq!(view.ip_fragments()[0].ip_packet_range.end, frame.len());
     }
 
     #[test]

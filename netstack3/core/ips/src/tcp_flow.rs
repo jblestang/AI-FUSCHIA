@@ -117,6 +117,11 @@ pub enum InboundSegmentClass {
 }
 
 impl TcpFlowState {
+    /// Cumulative delta for one direction (bytes removed from that stream).
+    pub fn direction_delta(&self, dir: TcpFlowDirection) -> u32 {
+        dir.state(self).delta
+    }
+
     /// Records a prefix-keep edit and updates deltas / dropped ranges.
     pub fn apply_keep_edit(
         &mut self,
