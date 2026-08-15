@@ -14,14 +14,14 @@ use netstack3_base::testutil::FakeDeviceId;
 use netstack3_base::NetworkSerializationContext;
 use netstack3_ip::testutil::FakeIpHeaderInfo;
 use netstack3_ip::{IpTransportContext, LocalDeliveryPacketInfo};
-use packet::{Buf, InnerPacketBuilder as _, NestablePacketBuilder as _, Serializer};
+use packet::{Buf, NestablePacketBuilder as _, Serializer};
 use packet_formats::udp::UdpPacketBuilder;
 
 use crate::internal::base::testutils::{
     BaseTestIpExt as _, FakeUdpBindingsCtx, UdpFakeDeviceCoreCtx, UdpFakeDeviceCtx, local_ip,
     remote_ip,
 };
-use crate::internal::base::{UdpApi, UdpIpTransportContext, UdpPacketMeta, UdpSocketId};
+use crate::internal::base::{DualStackUdpSocketId, UdpApi, UdpIpTransportContext, UdpPacketMeta};
 
 /// Target receive rate for the benchmark (1 Gbps).
 pub const TARGET_GBPS: f64 = 1.0;
@@ -34,9 +34,6 @@ const BATCH_DURATION: core::time::Duration = core::time::Duration::from_millis(1
 
 const LOCAL_PORT: NonZeroU16 = NonZeroU16::new(100).unwrap();
 const REMOTE_PORT: NonZeroU16 = NonZeroU16::new(200).unwrap();
-
-type BenchSocketId =
-    UdpSocketId<Ipv4, netstack3_base::testutil::FakeWeakDeviceId<FakeDeviceId>, FakeUdpBindingsCtx<FakeDeviceId>>;
 
 /// UDP payload sizes exercised by the benchmark (bytes).
 pub const PAYLOAD_SIZES: &[usize] = &[64, 128, 256, 512, 1024, 1472, 4096, 8192, 9000];
@@ -87,19 +84,13 @@ fn build_ipv4_udp_packet(payload_len: usize) -> PreparedPacket {
 fn receive_ipv4_udp_packet(
     core_ctx: &mut UdpFakeDeviceCoreCtx,
     bindings_ctx: &mut FakeUdpBindingsCtx<FakeDeviceId>,
-    packet: &PreparedPacket,
+    packet: &mut PreparedPacket,
+    early_demux_socket: Option<
+        DualStackUdpSocketId<Ipv4, netstack3_base::testutil::FakeWeakDeviceId<FakeDeviceId>, FakeUdpBindingsCtx<FakeDeviceId>>,
+    >,
 ) {
     let PreparedPacket { buffer, meta } = packet;
     let UdpPacketMeta { src_ip, dst_ip, dst_port, dscp_and_ecn, .. } = meta;
-
-    let early_demux_socket =
-        <UdpIpTransportContext as IpTransportContext<Ipv4, _, _>>::early_demux(
-            core_ctx,
-            &FakeDeviceId,
-            *src_ip,
-            *dst_ip,
-            buffer.as_ref(),
-        );
 
     let result = <UdpIpTransportContext as IpTransportContext<Ipv4, _, _>>::receive_ip_packet(
         core_ctx,
@@ -107,7 +98,8 @@ fn receive_ipv4_udp_packet(
         &FakeDeviceId,
         Ipv4::into_recv_src_addr(*src_ip),
         SpecifiedAddr::new(*dst_ip).unwrap(),
-        Buf::new(buffer.clone(), ..),
+        // Reuse the same backing allocation; constructing a fresh `Buf` resets parse state.
+        Buf::new(&mut buffer[..], ..),
         &mut LocalDeliveryPacketInfo {
             header_info: FakeIpHeaderInfo { dscp_and_ecn: *dscp_and_ecn, ..Default::default() },
             ..Default::default()
@@ -115,16 +107,6 @@ fn receive_ipv4_udp_packet(
         early_demux_socket,
     );
     assert!(result.is_ok(), "receive_ip_packet failed for dst_port={dst_port}");
-}
-
-fn clear_received(bindings_ctx: &mut FakeUdpBindingsCtx<FakeDeviceId>, socket: &BenchSocketId) {
-    bindings_ctx
-        .state
-        .received_mut::<Ipv4>()
-        .entry(socket.downgrade())
-        .or_default()
-        .packets
-        .clear();
 }
 
 /// Registers UDP receive throughput benchmarks for IPv4 at [`TARGET_GBPS`] Gbps.
@@ -139,19 +121,33 @@ pub fn add_udp_receive_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
         );
         group.throughput(Throughput::Bytes(batch_bytes));
         group.bench_function(bench_name, |bencher| {
-            let packet = build_ipv4_udp_packet(payload_len);
+            let mut packet = build_ipv4_udp_packet(payload_len);
             let mut ctx = UdpFakeDeviceCtx::with_core_ctx(UdpFakeDeviceCoreCtx::new_fake_device::<Ipv4>());
             let mut api = UdpApi::<Ipv4, _>::new(ctx.as_mut());
-            let socket = api.create();
-            api.listen(&socket, Some(ZonedAddr::Unzoned(local_ip::<Ipv4>())), Some(LOCAL_PORT))
+            let _socket = api.create();
+            api.listen(&_socket, Some(ZonedAddr::Unzoned(local_ip::<Ipv4>())), Some(LOCAL_PORT))
                 .expect("listen failed");
+
+            let UdpPacketMeta { src_ip, dst_ip, .. } = packet.meta;
+            let early_demux_socket =
+                <UdpIpTransportContext as IpTransportContext<Ipv4, _, _>>::early_demux(
+                    ctx.as_mut().core_ctx,
+                    &FakeDeviceId,
+                    src_ip,
+                    dst_ip,
+                    packet.buffer.as_ref(),
+                );
 
             bencher.iter(|| {
                 let ctx_pair = ctx.as_mut();
                 for _ in 0..packet_count {
-                    receive_ipv4_udp_packet(ctx_pair.core_ctx, ctx_pair.bindings_ctx, &packet);
+                    receive_ipv4_udp_packet(
+                        ctx_pair.core_ctx,
+                        ctx_pair.bindings_ctx,
+                        &mut packet,
+                        early_demux_socket.clone(),
+                    );
                 }
-                clear_received(ctx_pair.bindings_ctx, &socket);
             });
         });
         group.throughput(Throughput::Bytes(1));
@@ -188,16 +184,29 @@ mod tests {
         let payload_len = 512;
         let wire_bytes = ipv4_udp_wire_bytes(payload_len);
         let packet_count = packets_for_rate(wire_bytes, core::time::Duration::from_millis(1)).min(32);
-        let packet = build_ipv4_udp_packet(payload_len);
+        let mut packet = build_ipv4_udp_packet(payload_len);
         let mut ctx = UdpFakeDeviceCtx::with_core_ctx(UdpFakeDeviceCoreCtx::new_fake_device::<Ipv4>());
         let mut api = UdpApi::<Ipv4, _>::new(ctx.as_mut());
         let socket = api.create();
         api.listen(&socket, Some(ZonedAddr::Unzoned(local_ip::<Ipv4>())), Some(LOCAL_PORT))
             .expect("listen failed");
+        let UdpPacketMeta { src_ip, dst_ip, .. } = packet.meta;
+        let early_demux_socket =
+            <UdpIpTransportContext as IpTransportContext<Ipv4, _, _>>::early_demux(
+                ctx.as_mut().core_ctx,
+                &FakeDeviceId,
+                src_ip,
+                dst_ip,
+                packet.buffer.as_ref(),
+            );
         let ctx_pair = ctx.as_mut();
         for _ in 0..packet_count {
-            receive_ipv4_udp_packet(ctx_pair.core_ctx, ctx_pair.bindings_ctx, &packet);
+            receive_ipv4_udp_packet(
+                ctx_pair.core_ctx,
+                ctx_pair.bindings_ctx,
+                &mut packet,
+                early_demux_socket.clone(),
+            );
         }
-        clear_received(ctx_pair.bindings_ctx, &socket);
     }
 }

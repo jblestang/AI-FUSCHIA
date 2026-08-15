@@ -3330,13 +3330,22 @@ pub(crate) mod testutils {
             meta: UdpPacketMeta<I>,
             body: &[u8],
         ) -> Result<(), ReceiveUdpError> {
-            let SocketReceived { packets, max_size } =
-                self.state.received_mut::<I>().entry(id.downgrade()).or_default();
-            if packets.len() < *max_size {
-                packets.push(ReceivedPacket { meta, body: body.to_owned() });
-                Ok(())
-            } else {
-                Err(ReceiveUdpError::QueueFull)
+            // Benchmarks measure stack receive throughput, not bindings queue behavior.
+            #[cfg(feature = "benchmark")]
+            {
+                let _ = (id, meta, body);
+                return Ok(());
+            }
+            #[cfg(not(feature = "benchmark"))]
+            {
+                let SocketReceived { packets, max_size } =
+                    self.state.received_mut::<I>().entry(id.downgrade()).or_default();
+                if packets.len() < *max_size {
+                    packets.push(ReceivedPacket { meta, body: body.to_owned() });
+                    Ok(())
+                } else {
+                    Err(ReceiveUdpError::QueueFull)
+                }
             }
         }
 
