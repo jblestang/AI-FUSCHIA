@@ -110,6 +110,58 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for NoopIpsBindings {
     }
 }
 
+/// How [`OverwriteIpsBindings`] rewrites the UDP payload after ingress.
+#[derive(Clone, Copy, Debug)]
+pub enum OverwriteMode {
+    /// Same-length patch via [`UdpOverwriter::overwrite_payload_in_place`].
+    InPlace,
+    /// Shrink to half the original payload via [`UdpOverwriter::overwrite_payload`].
+    ShrinkHalf,
+}
+
+struct OverwriteIpsBindings {
+    datagrams: u64,
+    mode: OverwriteMode,
+    replacement: Vec<u8>,
+}
+
+impl OverwriteIpsBindings {
+    fn new(payload_len: usize, mode: OverwriteMode) -> Self {
+        let replacement_len = match mode {
+            OverwriteMode::InPlace => payload_len,
+            OverwriteMode::ShrinkHalf => payload_len / 2,
+        };
+        Self {
+            datagrams: 0,
+            mode,
+            replacement: vec![0xBB; replacement_len],
+        }
+    }
+}
+
+impl IpsReceiveBindingsContext<FakeDeviceId> for OverwriteIpsBindings {
+    fn receive_udp_datagram(
+        &mut self,
+        _device_id: &FakeDeviceId,
+        mut view: ReceivedUdpDatagramView,
+    ) -> Result<(), IpsReceiveError> {
+        match self.mode {
+            OverwriteMode::InPlace => {
+                view.udp_overwriter()
+                    .overwrite_payload_in_place(&self.replacement)
+                    .expect("in-place overwrite");
+            }
+            OverwriteMode::ShrinkHalf => {
+                view.udp_overwriter()
+                    .overwrite_payload(&self.replacement)
+                    .expect("shrink overwrite");
+            }
+        }
+        self.datagrams += 1;
+        Ok(())
+    }
+}
+
 struct BenchmarkCtx {
     state: IpsState,
     bindings: NoopIpsBindings,
@@ -133,6 +185,31 @@ fn receive_ips_frame(ctx: &mut BenchmarkCtx, template: &[u8]) {
         frame,
     );
     assert!(result.is_ok(), "IPS ingress must consume valid UDP/IPv4 Ethernet frames");
+}
+
+struct OverwriteBenchmarkCtx {
+    state: IpsState,
+    bindings: OverwriteIpsBindings,
+    device_id: FakeDeviceId,
+}
+
+fn setup_overwrite_benchmark_ctx(payload_len: usize, mode: OverwriteMode) -> OverwriteBenchmarkCtx {
+    OverwriteBenchmarkCtx {
+        state: IpsState::new(),
+        bindings: OverwriteIpsBindings::new(payload_len, mode),
+        device_id: FakeDeviceId,
+    }
+}
+
+fn receive_ips_frame_with_overwrite(ctx: &mut OverwriteBenchmarkCtx, template: &[u8]) {
+    let frame = Buf::new(template.to_vec(), ..);
+    let result = process_ethernet_frame(
+        &ctx.state,
+        &mut ctx.bindings,
+        &ctx.device_id,
+        frame,
+    );
+    assert!(result.is_ok(), "IPS ingress with overwrite must succeed");
 }
 
 fn register_payload_benches(group: &mut BenchmarkGroup<'_, WallTime>, payload_sizes: &[usize]) {
@@ -182,6 +259,50 @@ pub fn add_ips_attack_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
     register_payload_benches(group, ATTACK_PAYLOAD_SIZES);
 }
 
+fn register_overwrite_benches(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    payload_sizes: &[usize],
+    mode: OverwriteMode,
+) {
+    let mode_label = match mode {
+        OverwriteMode::InPlace => "in-place",
+        OverwriteMode::ShrinkHalf => "shrink-half",
+    };
+
+    for &payload_len in payload_sizes {
+        if matches!(mode, OverwriteMode::ShrinkHalf) && payload_len < 2 {
+            continue;
+        }
+
+        let frame = build_ethernet_ipv4_udp_frame(payload_len);
+        let wire_bytes = frame.template.len();
+        let pps = packets_per_second_for_1gbps(wire_bytes);
+        let replacement_len = match mode {
+            OverwriteMode::InPlace => payload_len,
+            OverwriteMode::ShrinkHalf => payload_len / 2,
+        };
+
+        let base = format!(
+            "ipv4/ips/recv+overwrite/{mode_label}/{payload_len}B->{replacement_len}B/{TARGET_GBPS:.2}Gbps/{pps:.0}pps-required"
+        );
+
+        group.throughput(Throughput::Elements(1));
+        group.bench_function(format!("{base}/per-packet"), |bencher| {
+            let mut ctx = setup_overwrite_benchmark_ctx(payload_len, mode);
+
+            bencher.iter(|| {
+                receive_ips_frame_with_overwrite(&mut ctx, &frame.template);
+            });
+        });
+    }
+}
+
+/// Registers end-to-end receive + [`UdpOverwriter`] benchmarks.
+pub fn add_ips_overwrite_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
+    register_overwrite_benches(group, ATTACK_PAYLOAD_SIZES, OverwriteMode::InPlace);
+    register_overwrite_benches(group, ATTACK_PAYLOAD_SIZES, OverwriteMode::ShrinkHalf);
+}
+
 /// Hot loop for CPU profiling (perf / samply).
 pub fn profile_hot_loop(payload_len: usize, batches: Option<u64>) {
     let wire_bytes = ethernet_ipv4_udp_wire_bytes(payload_len);
@@ -216,6 +337,13 @@ pub fn add_benches(c: &mut Criterion) {
     group.sample_size(50);
     add_ips_receive_benches(&mut group);
     group.finish();
+
+    let mut overwrite = c.benchmark_group("netstack3/ips/overwrite_throughput");
+    overwrite.warm_up_time(core::time::Duration::from_millis(500));
+    overwrite.measurement_time(core::time::Duration::from_secs(3));
+    overwrite.sample_size(50);
+    add_ips_overwrite_benches(&mut overwrite);
+    overwrite.finish();
 }
 
 #[cfg(test)]
@@ -258,6 +386,24 @@ mod tests {
         // Integer division in `packets_for_rate` may be slightly below the exact bit budget.
         assert!(total <= TARGET_BPS / 8);
         assert!(total + wire as u64 > TARGET_BPS / 8);
+    }
+
+    #[test]
+    fn smoke_ips_receive_with_in_place_overwrite() {
+        let payload_len = 64;
+        let frame = build_ethernet_ipv4_udp_frame(payload_len);
+        let mut ctx = setup_overwrite_benchmark_ctx(payload_len, OverwriteMode::InPlace);
+        receive_ips_frame_with_overwrite(&mut ctx, &frame.template);
+        assert_eq!(ctx.bindings.datagrams, 1);
+    }
+
+    #[test]
+    fn smoke_ips_receive_with_shrink_overwrite() {
+        let payload_len = 64;
+        let frame = build_ethernet_ipv4_udp_frame(payload_len);
+        let mut ctx = setup_overwrite_benchmark_ctx(payload_len, OverwriteMode::ShrinkHalf);
+        receive_ips_frame_with_overwrite(&mut ctx, &frame.template);
+        assert_eq!(ctx.bindings.datagrams, 1);
     }
 
     #[test]
