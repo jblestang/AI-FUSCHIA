@@ -66,8 +66,8 @@ pub const TARGET_GBPS: f64 = 1.0;
 /// Target receive rate in bits per second.
 pub const TARGET_BPS: u64 = 1_000_000_000;
 
-/// Duration of traffic simulated per benchmark iteration.
-pub const BATCH_DURATION: core::time::Duration = core::time::Duration::from_millis(10);
+/// Duration of traffic simulated per benchmark iteration (1 second @ [`TARGET_BPS`]).
+pub const BATCH_DURATION: core::time::Duration = core::time::Duration::from_millis(1000);
 
 const LOCAL_PORT: NonZeroU16 = NonZeroU16::new(100).unwrap();
 const REMOTE_PORT: NonZeroU16 = NonZeroU16::new(200).unwrap();
@@ -153,8 +153,9 @@ pub fn add_udp_receive_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
         let packet_count = packets_for_rate(wire_bytes, BATCH_DURATION);
         let batch_bytes = total_wire_bytes(wire_bytes, packet_count);
 
+        let batch_ms = BATCH_DURATION.as_millis();
         let bench_name = format!(
-            "ipv4/recv/{payload_len}B-payload/{packet_count}pkts/{TARGET_GBPS:.2}Gbps-target"
+            "ipv4/recv/{payload_len}B-payload/{packet_count}pkts/{batch_ms}ms/{TARGET_GBPS:.2}Gbps-target"
         );
         group.throughput(Throughput::Bytes(batch_bytes));
         group.bench_function(bench_name, |bencher| {

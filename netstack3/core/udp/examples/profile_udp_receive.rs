@@ -14,8 +14,8 @@ use std::env;
 
 use netstack3_udp::benchmarks::{self, TARGET_BPS};
 
-/// How many 10 ms @ 1 Gbps batches to execute (~10 s of hot path at 512 B payload).
-const BATCHES: u64 = 8000;
+/// How many [`benchmarks::BATCH_DURATION`] @ 1 Gbps batches to execute (~10 s simulated traffic).
+const BATCHES: u64 = 10;
 
 fn main() {
     let payload_len: usize = env::var("PAYLOAD")
@@ -26,8 +26,9 @@ fn main() {
     let wire_bytes = benchmarks::ipv4_udp_wire_bytes(payload_len);
     let packet_count = benchmarks::packets_for_rate(wire_bytes, benchmarks::BATCH_DURATION);
 
+    let batch_ms = benchmarks::BATCH_DURATION.as_millis();
     eprintln!(
-        "profile_udp_receive: payload={payload_len}B wire={wire_bytes}B packets/batch={packet_count} batches={BATCHES} target={TARGET_BPS}bps"
+        "profile_udp_receive: payload={payload_len}B wire={wire_bytes}B packets/batch={packet_count} batch_ms={batch_ms} batches={BATCHES} target={TARGET_BPS}bps"
     );
 
     benchmarks::profile_hot_loop(payload_len, Some(BATCHES));
