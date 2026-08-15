@@ -354,6 +354,9 @@ fn compute_ipv4_header_checksum(header_prefix: &[u8]) -> [u8; 2] {
 mod tests {
     use core::num::NonZeroU16;
 
+    use alloc::vec;
+    use alloc::vec::Vec;
+
     use net_types::ethernet::Mac;
     use netstack3_base::NetworkSerializationContext;
     use packet::{Buf, NestableSerializer as _, ParsablePacket, Serializer};
@@ -427,6 +430,157 @@ mod tests {
         Ipv4Packet::parse(&mut ip_bytes, ()).is_ok()
     }
 
+    fn build_ipv4_udp_fragment(
+        fragment_offset: packet_formats::ip::FragmentOffset,
+        more_fragments: bool,
+        body: Vec<u8>,
+        fragment_id: u16,
+    ) -> Buf<Vec<u8>> {
+        let mut ip = packet_formats::ipv4::Ipv4PacketBuilder::new(
+            REMOTE,
+            LOCAL,
+            64,
+            Ipv4Proto::Proto(IpProto::Udp),
+        );
+        ip.id(fragment_id);
+        ip.mf_flag(more_fragments);
+        ip.fragment_offset(fragment_offset);
+        let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
+        let bytes = Buf::new(body, ..)
+            .wrap_in(ip)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner();
+        Buf::new(bytes, ..)
+    }
+
+    fn deliver_fragmented_udp(payload_len: usize) -> ReceivedUdpDatagramView {
+        use netstack3_base::testutil::FakeDeviceId;
+
+        use crate::context::IpsReceiveBindingsContext;
+        use crate::{IpsReceiveError, IpsState, process_ethernet_frame};
+
+        const FRAGMENT_ID: u16 = 0x00_7e;
+        const FRAGMENT_BODY_LEN: usize = 104;
+        let udp_total = HEADER_BYTES + payload_len;
+
+        let mut first_body = vec![
+            (REMOTE_PORT.get() >> 8) as u8,
+            (REMOTE_PORT.get() & 0xff) as u8,
+            (LOCAL_PORT.get() >> 8) as u8,
+            (LOCAL_PORT.get() & 0xff) as u8,
+            (udp_total >> 8) as u8,
+            (udp_total & 0xff) as u8,
+            0x00,
+            0x00,
+        ];
+        first_body.resize(FRAGMENT_BODY_LEN, 0xAA);
+
+        let second_len = udp_total - FRAGMENT_BODY_LEN;
+        let second_body = vec![0xBB; second_len];
+
+        let frag0 = build_ipv4_udp_fragment(
+            packet_formats::ip::FragmentOffset::ZERO,
+            true,
+            first_body,
+            FRAGMENT_ID,
+        );
+        let frag1 = build_ipv4_udp_fragment(
+            packet_formats::ip::FragmentOffset::new(13).unwrap(),
+            false,
+            second_body,
+            FRAGMENT_ID,
+        );
+
+        struct Capture {
+            view: Option<ReceivedUdpDatagramView>,
+        }
+
+        impl IpsReceiveBindingsContext<FakeDeviceId> for Capture {
+            fn receive_udp_datagram(
+                &mut self,
+                _device: &FakeDeviceId,
+                view: ReceivedUdpDatagramView,
+            ) -> Result<(), IpsReceiveError> {
+                self.view = Some(view);
+                Ok(())
+            }
+        }
+
+        let state = IpsState::new();
+        let mut handler = Capture { view: None };
+        for frame in [frag0, frag1] {
+            process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frame).unwrap();
+        }
+
+        let view = handler.view.expect("reassembled");
+        assert_eq!(view.ip_fragments().len(), 2);
+        assert_eq!(
+            view.ip_fragment_metadata().reassembly_outcome,
+            ReassemblyOutcome::Complete
+        );
+        assert!(
+            view.ip_fragments().iter().any(|f| f.more_fragments),
+            "original datagram must have MF set on at least one fragment"
+        );
+        view
+    }
+
+    fn parsed_ipv4_fields(frame: &[u8]) -> (u16, bool, u16) {
+        use packet_formats::ipv4::Ipv4Header;
+
+        let ip_offset = ETHERNET_HDR_LEN_NO_TAG;
+        let mut ip_bytes = &frame[ip_offset..];
+        let packet = Ipv4Packet::parse(&mut ip_bytes, ()).expect("parse ipv4");
+        let ip_total = u16::from_be_bytes([
+            frame[ip_offset + IPV4_TOTAL_LEN_OFFSET],
+            frame[ip_offset + IPV4_TOTAL_LEN_OFFSET + 1],
+        ]);
+        (
+            ip_total,
+            packet.mf_flag(),
+            packet.fragment_offset().into_raw(),
+        )
+    }
+
+    #[test]
+    fn overwrite_shrinks_fragmented_udp_to_single_fragment_clears_mf_and_total_len() {
+        const ORIGINAL_PAYLOAD: usize = 200;
+        const NEW_PAYLOAD: usize = 32;
+        const EXPECTED_UDP_LEN: u16 = 40; // 8 + 32
+        const EXPECTED_IP_TOTAL: u16 = 60; // 20 + 8 + 32
+
+        let mut view = deliver_fragmented_udp(ORIGINAL_PAYLOAD);
+        assert_eq!(view.payload_slices().len(), 2);
+
+        view.udp_overwriter()
+            .overwrite_payload(&[0xCC; NEW_PAYLOAD])
+            .expect("shrink fragmented datagram");
+
+        assert_eq!(view.ip_fragments().len(), 1, "must consolidate to one IP fragment");
+        assert_eq!(view.eth_frames().count(), 1, "extra fragment frames must be dropped");
+        assert_eq!(
+            view.ip_fragment_metadata().reassembly_outcome,
+            ReassemblyOutcome::NotApplicable
+        );
+
+        let frag = &view.ip_fragments()[0];
+        assert!(!frag.more_fragments, "MF metadata must be cleared");
+        assert_eq!(frag.fragment_offset, 0, "fragment offset must be reset");
+
+        assert_eq!(view.udp_header().unwrap().length, EXPECTED_UDP_LEN);
+        assert_eq!(view.payload_slices().iter().map(|s| s.len()).sum::<usize>(), NEW_PAYLOAD);
+
+        let frame = view.eth_frames().next().unwrap();
+        let (ip_total, mf, frag_off) = parsed_ipv4_fields(frame);
+        assert_eq!(ip_total, EXPECTED_IP_TOTAL, "IPv4 total length must match shrunk datagram");
+        assert!(!mf, "IPv4 MF flag must be cleared in the on-wire header");
+        assert_eq!(frag_off, 0, "IPv4 fragment offset must be zero");
+        assert!(frame_parseable(frame));
+    }
+
     #[test]
     fn overwrite_shrinks_payload_and_updates_checksums() {
         let mut view = build_unfragmented_udp(&[0xAA; 64]);
@@ -436,8 +590,14 @@ mod tests {
 
         assert_eq!(view.payload_slices().iter().map(|s| s.len()).sum::<usize>(), 32);
         assert_eq!(view.udp_header().unwrap().length, 40);
-        assert!(frame_parseable(view.eth_frames().next().unwrap()));
+        let frame = view.eth_frames().next().unwrap();
+        assert!(frame_parseable(frame));
         assert_eq!(view.payload_slices().iter().next().unwrap(), &[0xBB; 32]);
+
+        let (ip_total, mf, frag_off) = parsed_ipv4_fields(frame);
+        assert_eq!(ip_total, 60);
+        assert!(!mf);
+        assert_eq!(frag_off, 0);
     }
 
     #[test]
