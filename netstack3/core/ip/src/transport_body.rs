@@ -38,12 +38,12 @@ pub fn transport_range_in_storage(storage: &Arc<[u8]>, transport: &[u8]) -> Rang
 
 /// Builds a [`SharedPacketView`] when transport start in the frame is already known.
 pub fn shared_packet_view_at_transport_start(
-    frame: &Arc<[u8]>,
+    frame: Arc<[u8]>,
     transport_start: usize,
     parse_meta: ParseMetadata,
 ) -> SharedPacketView {
     let layers = layer_ranges_in_frame(frame.len(), transport_start, parse_meta);
-    SharedPacketView::contiguous(Arc::clone(frame), layers)
+    SharedPacketView::contiguous(frame, layers)
 }
 
 /// Computes the byte offset of a parsed transport header within pinned frame storage.
@@ -73,7 +73,7 @@ pub fn shared_packet_view_for_transport(
     match frame_storage {
         Some(frame) => {
             let transport_start = transport_range_in_storage(frame, transport_buffer).start;
-            shared_packet_view_at_transport_start(frame, transport_start, parse_meta)
+            shared_packet_view_at_transport_start(Arc::clone(frame), transport_start, parse_meta)
         }
         None => {
             let storage: Arc<[u8]> = Arc::from(transport_buffer);

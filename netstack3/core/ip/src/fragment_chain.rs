@@ -193,24 +193,35 @@ pub struct LayerRanges {
     pub payload: Range<usize>,
 }
 
+/// Backing storage for a [`SharedPacketView`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SharedPacketStorage {
+    /// Single pinned RX buffer (typical UDP/TCP segment path).
+    Contiguous(Arc<[u8]>),
+    /// Reassembled IP fragment chain.
+    Segmented(Arc<[PacketSegment]>),
+}
+
 /// Shared packet bytes with layer boundaries for userspace inspection.
+///
+/// Contiguous RX frames store `Arc<[u8]>` directly (no extra wrapper allocation).
+/// Fragment reassembly uses segmented storage behind the same type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SharedPacketView {
-    segments: Arc<[PacketSegment]>,
+    storage: SharedPacketStorage,
     layers: LayerRanges,
 }
 
 impl SharedPacketView {
     /// Builds a view over a single contiguous buffer with layer ranges.
     pub fn contiguous(storage: Arc<[u8]>, layers: LayerRanges) -> Self {
-        let len = storage.len();
-        Self { segments: Arc::from([PacketSegment { storage, range: 0..len }]), layers }
+        Self { storage: SharedPacketStorage::Contiguous(storage), layers }
     }
 
     /// Builds a view from a reassembled fragment chain and layer ranges in logical packet space.
     pub fn from_chain(chain: ReassembledChain, layers: LayerRanges) -> Self {
         let segments: alloc::vec::Vec<PacketSegment> = chain.segments_in_order().cloned().collect();
-        Self { segments: segments.into(), layers }
+        Self { storage: SharedPacketStorage::Segmented(segments.into()), layers }
     }
 
     pub fn layers(&self) -> &LayerRanges {
@@ -218,7 +229,10 @@ impl SharedPacketView {
     }
 
     pub fn segments(&self) -> &[PacketSegment] {
-        &self.segments
+        match &self.storage {
+            SharedPacketStorage::Contiguous(_) => &[],
+            SharedPacketStorage::Segmented(segments) => segments,
+        }
     }
 
     /// Invokes `f` with the full stored bytes as a fragmented view (zero-copy).
@@ -226,9 +240,7 @@ impl SharedPacketView {
     where
         F: for<'b> FnOnce(FragmentedBytes<'b, '_>) -> R,
     {
-        let mut slices: alloc::vec::Vec<&[u8]> =
-            self.segments.iter().map(|s| s.as_slice()).collect();
-        f(FragmentedBytes::new(&mut slices))
+        self.with_subrange(self.layers.ip.clone(), f)
     }
 
     /// Invokes `f` with bytes for the transport layer and above.
@@ -254,23 +266,34 @@ impl SharedPacketView {
 
     /// Returns a contiguous subslice of the logical packet when wholly within one segment.
     pub fn slice_at(&self, logical: Range<usize>) -> &[u8] {
-        let mut cursor = 0;
-        for seg in self.segments.iter() {
-            let seg_len = seg.len();
-            let seg_start = cursor;
-            let seg_end = cursor + seg_len;
-            cursor = seg_end;
-            if logical.end <= seg_start || logical.start >= seg_end {
-                continue;
+        match &self.storage {
+            SharedPacketStorage::Contiguous(storage) => {
+                let end = logical.end.min(storage.len());
+                if logical.start >= end {
+                    return &[];
+                }
+                &storage[logical.start..end]
             }
-            if logical.start >= seg_start && logical.end <= seg_end {
-                let local_start = logical.start - seg_start;
-                let local_end = logical.end - seg_start;
-                return &seg.as_slice()[local_start..local_end];
+            SharedPacketStorage::Segmented(segments) => {
+                let mut cursor = 0;
+                for seg in segments.iter() {
+                    let seg_len = seg.len();
+                    let seg_start = cursor;
+                    let seg_end = cursor + seg_len;
+                    cursor = seg_end;
+                    if logical.end <= seg_start || logical.start >= seg_end {
+                        continue;
+                    }
+                    if logical.start >= seg_start && logical.end <= seg_end {
+                        let local_start = logical.start - seg_start;
+                        let local_end = logical.end - seg_start;
+                        return &seg.as_slice()[local_start..local_end];
+                    }
+                    break;
+                }
+                &[]
             }
-            break;
         }
-        &[]
     }
 
     /// Invokes `f` with the full IP datagram bytes.
@@ -285,21 +308,35 @@ impl SharedPacketView {
     where
         F: for<'b> FnOnce(FragmentedBytes<'b, '_>) -> R,
     {
-        let mut out: alloc::vec::Vec<&[u8]> = alloc::vec::Vec::new();
-        let mut cursor = 0;
-        for seg in self.segments.iter() {
-            let seg_len = seg.len();
-            let seg_start = cursor;
-            let seg_end = cursor + seg_len;
-            cursor = seg_end;
-            if seg_end <= logical.start || seg_start >= logical.end {
-                continue;
+        match &self.storage {
+            SharedPacketStorage::Contiguous(storage) => {
+                let end = logical.end.min(storage.len());
+                if logical.start >= end {
+                    let mut empty: [&[u8]; 0] = [];
+                    return f(FragmentedBytes::new(&mut empty));
+                }
+                let slice = &storage[logical.start..end];
+                let mut slices = [slice];
+                f(FragmentedBytes::new(&mut slices))
             }
-            let local_start = logical.start.saturating_sub(seg_start);
-            let local_end = (logical.end - seg_start).min(seg_len);
-            out.push(&seg.as_slice()[local_start..local_end]);
+            SharedPacketStorage::Segmented(segments) => {
+                let mut out: alloc::vec::Vec<&[u8]> = alloc::vec::Vec::new();
+                let mut cursor = 0;
+                for seg in segments.iter() {
+                    let seg_len = seg.len();
+                    let seg_start = cursor;
+                    let seg_end = cursor + seg_len;
+                    cursor = seg_end;
+                    if seg_end <= logical.start || seg_start >= logical.end {
+                        continue;
+                    }
+                    let local_start = logical.start.saturating_sub(seg_start);
+                    let local_end = (logical.end - seg_start).min(seg_len);
+                    out.push(&seg.as_slice()[local_start..local_end]);
+                }
+                f(FragmentedBytes::new(&mut out))
+            }
         }
-        f(FragmentedBytes::new(&mut out))
     }
 }
 

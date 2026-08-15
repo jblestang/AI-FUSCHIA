@@ -2666,7 +2666,8 @@ fn dispatch_receive_ipv4_packet<
 
     let proto = packet.proto();
 
-    let frame_storage = receive_meta.frame_storage.clone();
+    let mut receive_meta = receive_meta;
+    let frame_storage = receive_meta.frame_storage.take();
 
     let (prefix, options, body) = packet.parts_with_body_mut();
     let header_info = Ipv4HeaderInfo { prefix, options: options.as_ref() };
@@ -2811,7 +2812,8 @@ fn dispatch_receive_ipv6_packet<
 
     let proto = packet.proto();
 
-    let frame_storage = meta.frame_storage.clone();
+    let mut meta = meta;
+    let frame_storage = meta.frame_storage.take();
 
     let (fixed, extension, body) = packet.parts_with_body_mut();
     let header_info = Ipv6HeaderInfo { fixed, extension };

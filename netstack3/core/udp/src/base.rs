@@ -1194,23 +1194,19 @@ impl<I: Ip> UdpRecvDatagram<I> {
     fn from_parsed_transport<H: IpHeaderInfo<I>>(
         meta: UdpPacketMeta<I>,
         header_info: &H,
-        frame_storage: Option<&alloc::sync::Arc<[u8]>>,
+        frame_storage: Option<alloc::sync::Arc<[u8]>>,
         packet: &UdpPacket<&[u8]>,
         parse_meta: packet::ParseMetadata,
     ) -> Self {
         let view = match frame_storage {
-            Some(frame) => match transport_start_in_frame(frame, packet.body(), parse_meta) {
+            Some(frame) => match transport_start_in_frame(&frame, packet.body(), parse_meta) {
                 Some(start) => shared_packet_view_at_transport_start(frame, start, parse_meta),
                 None => Self::shared_view_from_packet_wire(packet, parse_meta),
             },
             None => Self::shared_view_from_packet_wire(packet, parse_meta),
         };
-        Self {
-            meta,
-            ip_meta: IpReceiveMeta::from_header(header_info),
-            payload: UdpReceiveBuffer::sharing(view.clone()),
-            view,
-        }
+        let payload = UdpReceiveBuffer::sharing(view.clone());
+        Self { meta, ip_meta: IpReceiveMeta::from_header(header_info), view, payload }
     }
 
     fn shared_view_from_packet_wire(
@@ -1845,7 +1841,7 @@ fn receive_ip_packet_early_demux<
     header_info: &H,
     parsing_context: &mut NetworkParsingContext,
     early_demux_socket: I::DualStackBoundSocketId<CC::WeakDeviceId, Udp<BC>>,
-    frame_storage: &Option<alloc::sync::Arc<[u8]>>,
+    frame_storage: Option<alloc::sync::Arc<[u8]>>,
 ) -> Result<(), (B, I::IcmpError)> {
     let Ok(packet) = buffer.parse_with::<_, UdpPacket<_>>(UdpParseArgs::with_context(
         src_ip,
@@ -1874,7 +1870,7 @@ fn receive_ip_packet_early_demux<
     let datagram = UdpRecvDatagram::from_parsed_transport(
         meta,
         header_info,
-        frame_storage.as_ref(),
+        frame_storage,
         &packet,
         parse_meta,
     );
@@ -1936,7 +1932,7 @@ fn receive_ip_packet<
             header_info,
             parsing_context,
             early_demux_socket.expect("checked is_some above"),
-            &*frame_storage,
+            frame_storage.take(),
         );
     }
 
@@ -2041,7 +2037,7 @@ fn receive_ip_packet<
     let datagram = UdpRecvDatagram::from_parsed_transport(
         meta,
         header_info,
-        frame_storage.as_ref(),
+        frame_storage.take(),
         &packet,
         parse_meta,
     );
