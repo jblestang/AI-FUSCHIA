@@ -691,6 +691,7 @@ name = "netstack3-ips"
 version = "0.1.0"
 dependencies = [
  "assert_matches",
+ "criterion",
  "log",
  "net-types",
  "netstack3-base",

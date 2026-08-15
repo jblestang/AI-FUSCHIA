@@ -28,6 +28,9 @@ mod view;
 #[cfg(feature = "benchmark")]
 pub mod benchmarks;
 
+/// Layer 7 analysis helpers (TOS mismatch detection, etc.).
+pub mod analysis;
+pub use analysis::{detect_tos_mismatch, ipv4_dscp_and_ecn, TosMismatch};
 pub use context::{
     IpsIngressHandler, IpsIngressResult, IpsReceiveBindingsContext, IpsReceiveError,
     TryIntoIpsFrame,

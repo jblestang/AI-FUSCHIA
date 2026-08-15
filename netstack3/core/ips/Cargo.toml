@@ -8,7 +8,7 @@ license.workspace = true
 name = "netstack3_ips"
 
 [features]
-testutils = ["instrumented"]
+testutils = ["instrumented", "netstack3_base/testutils"]
 instrumented = []
 benchmark-harness = []
 benchmark = ["benchmark-harness", "netstack3_base/benchmark-harness", "dep:criterion"]
@@ -27,6 +27,10 @@ zerocopy = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 netstack3_base = { package = "netstack3-base", path = "../base", features = ["testutils"] }
+
+[[example]]
+name = "detect_tos_mismatch"
+required-features = ["testutils"]
 
 [[bench]]
 name = "ips_receive_throughput"

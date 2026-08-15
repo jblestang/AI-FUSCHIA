@@ -13,8 +13,8 @@ use netstack3_base::StrongDeviceIdentifier;
 use packet::{Buf, Buffer as _, GrowBuffer as _, ParsablePacket};
 use packet_formats::ethernet::{EtherType, EthernetFrame, EthernetFrameLengthCheck};
 use packet_formats::ip::{IpProto, Ipv4Proto, Ipv6Proto};
-use packet_formats::ipv4::Ipv4Packet;
-use packet_formats::ipv6::Ipv6Packet;
+use packet_formats::ipv4::{Ipv4Header, Ipv4Packet};
+use packet_formats::ipv6::{Ipv6Header, Ipv6Packet};
 
 use crate::context::IpsReceiveBindingsContext;
 use crate::fragment::{add_fragment, ipv4_key, store_fragment};
