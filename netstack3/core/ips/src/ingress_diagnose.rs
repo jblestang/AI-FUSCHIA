@@ -16,7 +16,13 @@ use packet_formats::ip::{IpProto, Ipv4Proto, Ipv6Proto};
 use packet_formats::ipv4::{Ipv4Header, Ipv4Packet};
 use packet_formats::ipv6::{Ipv6Header, Ipv6Packet};
 
-use crate::view::{parse_tcp_header, parse_udp_header};
+use crate::view::{parse_icmp_header, parse_tcp_header, parse_udp_header};
+
+enum DiagnoseIpv4L4 {
+    Udp,
+    Tcp,
+    Icmp,
+}
 
 /// One IPS ingress rejection stage (matches `process_ethernet_frame` error paths).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +37,8 @@ pub enum IngressRejectionStage {
     UnsupportedIpv4Protocol,
     /// UDP header could not be parsed (IPv4 or IPv6 path).
     UdpHeaderParse,
+    /// ICMP header could not be parsed (IPv4 or IPv6 path).
+    IcmpHeaderParse,
     /// Frame ends before the UDP payload start (IPv4 only).
     FrameTruncated,
     /// TCP header could not be parsed (IPv4 only).
@@ -52,6 +60,7 @@ impl IngressRejectionStage {
             Self::Ipv4Parse => "ipv4_parse",
             Self::UnsupportedIpv4Protocol => "unsupported_ipv4_protocol",
             Self::UdpHeaderParse => "udp_header_parse",
+            Self::IcmpHeaderParse => "icmp_header_parse",
             Self::FrameTruncated => "frame_truncated",
             Self::TcpHeaderParse => "tcp_header_parse",
             Self::Ipv6Parse => "ipv6_parse",
@@ -65,12 +74,13 @@ impl IngressRejectionStage {
             Self::EthernetParse => "malformed or truncated Ethernet header",
             Self::UnsupportedEthertype => "EtherType is not IPv4 (0x0800) or IPv6 (0x86DD)",
             Self::Ipv4Parse => "malformed or truncated IPv4 header",
-            Self::UnsupportedIpv4Protocol => "IPv4 protocol is not UDP or TCP",
+            Self::UnsupportedIpv4Protocol => "IPv4 protocol is not UDP, TCP, or ICMP",
             Self::UdpHeaderParse => "malformed or truncated UDP header",
+            Self::IcmpHeaderParse => "malformed or truncated ICMP header",
             Self::FrameTruncated => "frame shorter than UDP header + payload start",
             Self::TcpHeaderParse => "malformed or truncated TCP header",
             Self::Ipv6Parse => "malformed or truncated IPv6 header",
-            Self::UnsupportedIpv6Protocol => "IPv6 next header is not UDP or TCP",
+            Self::UnsupportedIpv6Protocol => "IPv6 next header is not UDP, TCP, or ICMPv6",
             Self::Ipv6FragmentUnsupported => "IPv6 fragments are not supported on ingress",
         }
     }
@@ -202,7 +212,7 @@ fn diagnose_ipv4(
     diag: &mut IngressRejectionDiagnosis,
 ) -> Option<IngressRejectionDiagnosis> {
     let mut ip_bytes = &frame[ip_offset..];
-    let (src, dst, offset, mf, body_start, proto) = {
+    let (src, dst, offset, mf, body_start, l4) = {
         let packet = match Ipv4Packet::parse(&mut ip_bytes, ()) {
             Ok(p) => p,
             Err(_) => {
@@ -212,8 +222,10 @@ fn diagnose_ipv4(
             }
         };
 
-        let proto = match packet.proto() {
-            Ipv4Proto::Proto(p @ (IpProto::Udp | IpProto::Tcp)) => p,
+        let l4 = match packet.proto() {
+            Ipv4Proto::Proto(IpProto::Udp) => DiagnoseIpv4L4::Udp,
+            Ipv4Proto::Proto(IpProto::Tcp) => DiagnoseIpv4L4::Tcp,
+            Ipv4Proto::Icmp => DiagnoseIpv4L4::Icmp,
             other => {
                 diag.stage = IngressRejectionStage::UnsupportedIpv4Protocol;
                 diag.reason = diag.stage.default_reason();
@@ -232,22 +244,32 @@ fn diagnose_ipv4(
             packet.fragment_offset().into_raw(),
             packet.mf_flag(),
             body_start,
-            proto,
+            l4,
         )
     };
 
     diag.src_ip = Some(IpAddr::V4(src));
     diag.dst_ip = Some(IpAddr::V4(dst));
-    diag.ip_protocol = Some(proto.into());
+    diag.ip_protocol = Some(match l4 {
+        DiagnoseIpv4L4::Udp => IpProto::Udp.into(),
+        DiagnoseIpv4L4::Tcp => IpProto::Tcp.into(),
+        DiagnoseIpv4L4::Icmp => Ipv4Proto::Icmp.into(),
+    });
 
     let fragmented = mf || offset != 0;
     if fragmented {
-        return None;
+        return if matches!(l4, DiagnoseIpv4L4::Icmp) {
+            diag.stage = IngressRejectionStage::UnsupportedIpv4Protocol;
+            diag.reason = "fragmented ICMP is not supported on ingress";
+            Some(diag.clone())
+        } else {
+            None
+        };
     }
 
     let frame_len = frame.len();
-    match proto {
-        IpProto::Udp => {
+    match l4 {
+        DiagnoseIpv4L4::Udp => {
             let udp_hdr = match parse_udp_header(frame, 0, body_start) {
                 Some(hdr) => hdr,
                 None => {
@@ -265,9 +287,17 @@ fn diagnose_ipv4(
             }
             None
         }
-        IpProto::Tcp => {
+        DiagnoseIpv4L4::Tcp => {
             if parse_tcp_header(frame, 0, body_start).is_none() {
                 diag.stage = IngressRejectionStage::TcpHeaderParse;
+                diag.reason = diag.stage.default_reason();
+                return Some(diag.clone());
+            }
+            None
+        }
+        DiagnoseIpv4L4::Icmp => {
+            if parse_icmp_header(frame, 0, body_start).is_none() {
+                diag.stage = IngressRejectionStage::IcmpHeaderParse;
                 diag.reason = diag.stage.default_reason();
                 return Some(diag.clone());
             }
@@ -288,7 +318,7 @@ fn diagnose_ipv6(
 ) -> Option<IngressRejectionDiagnosis> {
     let is_fragment = ipv6_fragment_info(frame, ip_offset).3;
     let mut ip_bytes = &frame[ip_offset..];
-    let (src, dst, body_start, proto_byte) = {
+    let (src, dst, body_start, v6_proto) = {
         let packet = match Ipv6Packet::parse(&mut ip_bytes, ()) {
             Ok(p) => p,
             Err(_) => {
@@ -298,9 +328,12 @@ fn diagnose_ipv6(
             }
         };
 
-        let proto_byte: u8 = packet.proto().into();
-        let is_l4 = matches!(packet.proto(), Ipv6Proto::Proto(IpProto::Udp | IpProto::Tcp))
-            || is_fragment;
+        let v6_proto = packet.proto();
+        let proto_byte: u8 = v6_proto.into();
+        let is_l4 = matches!(
+            v6_proto,
+            Ipv6Proto::Proto(IpProto::Udp | IpProto::Tcp) | Ipv6Proto::Icmpv6
+        ) || is_fragment;
 
         if !is_l4 {
             diag.stage = IngressRejectionStage::UnsupportedIpv6Protocol;
@@ -312,12 +345,12 @@ fn diagnose_ipv6(
         }
 
         let body_start = ip_offset + ParsablePacket::parse_metadata(&packet).header_len();
-        (packet.src_ip(), packet.dst_ip(), body_start, proto_byte)
+        (packet.src_ip(), packet.dst_ip(), body_start, v6_proto)
     };
 
     diag.src_ip = Some(IpAddr::V6(src));
     diag.dst_ip = Some(IpAddr::V6(dst));
-    diag.ip_protocol = Some(proto_byte);
+    diag.ip_protocol = Some(v6_proto.into());
 
     if is_fragment {
         diag.stage = IngressRejectionStage::Ipv6FragmentUnsupported;
@@ -325,13 +358,29 @@ fn diagnose_ipv6(
         return Some(diag.clone());
     }
 
-    if parse_udp_header(frame, 0, body_start).is_none() {
-        diag.stage = IngressRejectionStage::UdpHeaderParse;
-        diag.reason = diag.stage.default_reason();
-        return Some(diag.clone());
+    match v6_proto {
+        Ipv6Proto::Proto(IpProto::Udp) => {
+            if parse_udp_header(frame, 0, body_start).is_none() {
+                diag.stage = IngressRejectionStage::UdpHeaderParse;
+                diag.reason = diag.stage.default_reason();
+                return Some(diag.clone());
+            }
+            None
+        }
+        Ipv6Proto::Icmpv6 => {
+            if parse_icmp_header(frame, 0, body_start).is_none() {
+                diag.stage = IngressRejectionStage::IcmpHeaderParse;
+                diag.reason = diag.stage.default_reason();
+                return Some(diag.clone());
+            }
+            None
+        }
+        _ => {
+            diag.stage = IngressRejectionStage::UnsupportedIpv6Protocol;
+            diag.reason = diag.stage.default_reason();
+            Some(diag.clone())
+        }
     }
-
-    None
 }
 
 #[cfg(test)]
@@ -387,6 +436,14 @@ mod tests {
         ) -> Result<(), IpsReceiveError> {
             Ok(())
         }
+
+        fn receive_icmp_message(
+            &mut self,
+            _device: &FakeDeviceId,
+            _view: crate::view::ReceivedIcmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
     }
 
     fn assert_diagnosis_matches_rejection(frame: Buf<Vec<u8>>) {
@@ -429,14 +486,28 @@ mod tests {
         let icmp = {
             let ip = Ipv4PacketBuilder::new(REMOTE, LOCAL, 64, Ipv4Proto::Icmp);
             let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
-            Buf::new(vec![0x08, 0x00, 0x00, 0x00], ..)
+            Buf::new(vec![0, 0, 0, 0, 0x12, 0x34, 0, 1], ..)
                 .wrap_in(ip)
                 .wrap_in(eth)
                 .serialize_vec_outer(&mut NetworkSerializationContext::default())
                 .unwrap()
                 .into_inner()
         };
-        assert_diagnosis_matches_rejection(icmp);
+        let icmp_bytes = icmp.as_ref().to_vec();
+        assert!(diagnose_ingress_rejection(&icmp_bytes).is_none());
+        assert_diagnosis_matches_rejection(Buf::new(icmp_bytes, ..));
+
+        let igmp = {
+            let ip = Ipv4PacketBuilder::new(REMOTE, LOCAL, 64, Ipv4Proto::Igmp);
+            let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
+            Buf::new(vec![0x11, 0x02, 0x00, 0x00], ..)
+                .wrap_in(ip)
+                .wrap_in(eth)
+                .serialize_vec_outer(&mut NetworkSerializationContext::default())
+                .unwrap()
+                .into_inner()
+        };
+        assert_diagnosis_matches_rejection(igmp);
 
         let truncated_udp = {
             let udp = UdpPacketBuilder::new(REMOTE, LOCAL, Some(REMOTE_PORT), LOCAL_PORT);

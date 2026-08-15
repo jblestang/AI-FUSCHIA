@@ -166,6 +166,14 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for NoopIpsBindings {
     ) -> Result<(), IpsReceiveError> {
         Ok(())
     }
+
+    fn receive_icmp_message(
+        &mut self,
+        _device_id: &FakeDeviceId,
+        _view: crate::view::ReceivedIcmpMessageView,
+    ) -> Result<(), IpsReceiveError> {
+        Ok(())
+    }
 }
 
 /// How [`OverwriteIpsBindings`] rewrites the UDP payload after ingress.
@@ -223,6 +231,14 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for OverwriteIpsBindings {
         &mut self,
         _device_id: &FakeDeviceId,
         _view: crate::view::ReceivedTcpSegmentView,
+    ) -> Result<(), IpsReceiveError> {
+        Ok(())
+    }
+
+    fn receive_icmp_message(
+        &mut self,
+        _device_id: &FakeDeviceId,
+        _view: crate::view::ReceivedIcmpMessageView,
     ) -> Result<(), IpsReceiveError> {
         Ok(())
     }
@@ -300,6 +316,14 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for TcpNoopIpsBindings {
         self.segments += 1;
         Ok(())
     }
+
+    fn receive_icmp_message(
+        &mut self,
+        _device_id: &FakeDeviceId,
+        _view: crate::view::ReceivedIcmpMessageView,
+    ) -> Result<(), IpsReceiveError> {
+        Ok(())
+    }
 }
 
 /// How [`TcpOverwriteIpsBindings`] rewrites TCP payload after ingress.
@@ -366,6 +390,14 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for TcpOverwriteIpsBindings {
                 .expect("TCP prefix-keep edit");
         }
         self.segments += 1;
+        Ok(())
+    }
+
+    fn receive_icmp_message(
+        &mut self,
+        _device_id: &FakeDeviceId,
+        _view: crate::view::ReceivedIcmpMessageView,
+    ) -> Result<(), IpsReceiveError> {
         Ok(())
     }
 }
@@ -546,6 +578,14 @@ fn deliver_tcp_view(template: &[u8]) -> ReceivedTcpSegmentView {
             view: ReceivedTcpSegmentView,
         ) -> Result<(), IpsReceiveError> {
             self.view = Some(view);
+            Ok(())
+        }
+
+        fn receive_icmp_message(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            _view: crate::view::ReceivedIcmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
             Ok(())
         }
     }
@@ -766,6 +806,14 @@ fn deliver_udp_view(template: &[u8]) -> ReceivedUdpDatagramView {
             &mut self,
             _device_id: &FakeDeviceId,
             _view: crate::view::ReceivedTcpSegmentView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
+
+        fn receive_icmp_message(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            _view: crate::view::ReceivedIcmpMessageView,
         ) -> Result<(), IpsReceiveError> {
             Ok(())
         }

@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use netstack3_base::StrongDeviceIdentifier;
 use packet::{Buffer as _, BufferMut, GrowBuffer as _};
 
-use crate::view::{ReceivedTcpSegmentView, ReceivedUdpDatagramView};
+use crate::view::{ReceivedIcmpMessageView, ReceivedTcpSegmentView, ReceivedUdpDatagramView};
 
 /// Errors encountered when delivering to Layer 7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +34,13 @@ pub trait IpsReceiveBindingsContext<D: StrongDeviceIdentifier> {
         &mut self,
         device_id: &D,
         view: ReceivedTcpSegmentView,
+    ) -> Result<(), IpsReceiveError>;
+
+    /// Delivers an ICMP or ICMPv6 message view.
+    fn receive_icmp_message(
+        &mut self,
+        device_id: &D,
+        view: ReceivedIcmpMessageView,
     ) -> Result<(), IpsReceiveError>;
 }
 

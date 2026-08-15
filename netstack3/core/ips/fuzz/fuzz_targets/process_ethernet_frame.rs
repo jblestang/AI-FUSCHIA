@@ -30,6 +30,13 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for FuzzHandler {
         let _ = view.ip_fragments().len();
         Ok(())
     }
+        fn receive_icmp_message(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            _view: netstack3_ips::ReceivedIcmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
 }
 
 fuzz_target!(|data: &[u8]| {

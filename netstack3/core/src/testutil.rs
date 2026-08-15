@@ -1417,6 +1417,13 @@ impl IpsReceiveBindingsContext<DeviceId<Self>> for FakeBindingsCtx {
         let _ = view;
         Ok(())
     }
+        fn receive_icmp_message(
+            &mut self,
+            _device_id: &DeviceId<Self>,
+            _view: netstack3_ips::ReceivedIcmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
 }
 
 impl UdpBindingsTypes for FakeBindingsCtx {

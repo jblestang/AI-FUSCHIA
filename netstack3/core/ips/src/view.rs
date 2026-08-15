@@ -510,6 +510,134 @@ impl<'a> TcpPayloadSliceView<'a> {
     }
 }
 
+/// Minimum ICMP/ICMPv6 header length (type, code, checksum) per RFC 792 / RFC 4443.
+pub const ICMP_HEADER_PREFIX_LEN: usize = 4;
+
+/// Parsed ICMP header fields and their location within a stored frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IcmpHeaderView {
+    /// ICMP message type.
+    pub msg_type: u8,
+    /// ICMP message code.
+    pub code: u8,
+    /// Index into [`ReceivedIcmpMessageView::eth_frames`].
+    pub eth_frame_index: usize,
+    /// Byte range of the 4-byte ICMP header prefix within the frame buffer.
+    pub header_range: Range<usize>,
+}
+
+/// Zero-copy view of a received ICMP message for IPS analysis.
+pub struct ReceivedIcmpMessageView {
+    frames: EthFrameStore,
+    ip_fragments: Vec<IpFragmentInfo>,
+    fragment_metadata: IpFragmentMetadata,
+    ethernet_header: Option<EthernetHeaderView>,
+    icmp_header: Option<IcmpHeaderView>,
+    payload_parts: Vec<PayloadPart>,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+}
+
+impl ReceivedIcmpMessageView {
+    pub(crate) fn new(
+        eth_frames: Vec<Buf<Vec<u8>>>,
+        ip_fragments: Vec<IpFragmentInfo>,
+        fragment_metadata: IpFragmentMetadata,
+        icmp_header: Option<IcmpHeaderView>,
+        payload_parts: Vec<(usize, Range<usize>)>,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+    ) -> Self {
+        let ethernet_header = ethernet_header_for_frames(&eth_frames, &ip_fragments);
+        Self {
+            frames: EthFrameStore::from_frames(eth_frames),
+            ip_fragments,
+            fragment_metadata,
+            ethernet_header,
+            icmp_header,
+            payload_parts: payload_parts
+                .into_iter()
+                .map(|(eth_frame_index, range)| PayloadPart { eth_frame_index, range })
+                .collect(),
+            src_ip,
+            dst_ip,
+        }
+    }
+
+    /// Source and destination IP addresses.
+    pub fn addrs(&self) -> (IpAddr, IpAddr) {
+        (self.src_ip, self.dst_ip)
+    }
+
+    /// Metadata describing IP fragment reception, including RFC 5722 events.
+    pub fn ip_fragment_metadata(&self) -> &IpFragmentMetadata {
+        &self.fragment_metadata
+    }
+
+    /// Parsed IP fragment information, one entry per received fragment.
+    pub fn ip_fragments(&self) -> &[IpFragmentInfo] {
+        &self.ip_fragments
+    }
+
+    /// Underlying Ethernet frame buffers.
+    pub fn eth_frames(&self) -> impl Iterator<Item = &[u8]> + '_ {
+        self.frames.eth_frames()
+    }
+
+    /// Parsed Ethernet header from the first IP fragment's backing frame.
+    pub fn ethernet_header(&self) -> Option<&EthernetHeaderView> {
+        self.ethernet_header.as_ref()
+    }
+
+    /// Parsed ICMP header prefix (type, code, checksum).
+    pub fn icmp_header(&self) -> Option<&IcmpHeaderView> {
+        self.icmp_header.as_ref()
+    }
+
+    /// ICMP message body after the 4-byte header prefix (zero-copy).
+    pub fn payload_slices(&self) -> IcmpPayloadSliceView<'_> {
+        IcmpPayloadSliceView { view: self }
+    }
+
+    pub fn src_ipv4(&self) -> Option<Ipv4Addr> {
+        match self.src_ip {
+            IpAddr::V4(v4) => Some(v4),
+            IpAddr::V6(_) => None,
+        }
+    }
+
+    pub fn src_ipv6(&self) -> Option<Ipv6Addr> {
+        match self.src_ip {
+            IpAddr::V6(v6) => Some(v6),
+            IpAddr::V4(_) => None,
+        }
+    }
+}
+
+/// Iovec-style read-only ICMP body view (bytes after the 4-octet header prefix).
+pub struct IcmpPayloadSliceView<'a> {
+    view: &'a ReceivedIcmpMessageView,
+}
+
+impl<'a> IcmpPayloadSliceView<'a> {
+    /// Number of payload slices.
+    pub fn len(&self) -> usize {
+        self.view.payload_parts.len()
+    }
+
+    /// Returns true if there are no payload slices.
+    pub fn is_empty(&self) -> bool {
+        self.view.payload_parts.is_empty()
+    }
+
+    /// Iterates payload slices in order.
+    pub fn iter(&self) -> impl Iterator<Item = &'a [u8]> + 'a {
+        self.view.payload_parts.iter().map(|part| {
+            &self.view.frames.frames()[part.eth_frame_index].as_ref()[part.range.clone()]
+        })
+    }
+}
+
 /// Parses an untagged Ethernet header from frame bytes; returns None if too short.
 pub(crate) fn parse_ethernet_header(
     frame: &[u8],
@@ -603,6 +731,24 @@ pub(crate) fn parse_tcp_header(
         window: segment.window_size(),
         eth_frame_index,
         header_range: tcp_start..tcp_start + header_len,
+    })
+}
+
+/// Parses an ICMP header prefix from frame bytes; returns None if too short.
+pub(crate) fn parse_icmp_header(
+    frame: &[u8],
+    eth_frame_index: usize,
+    icmp_start: usize,
+) -> Option<IcmpHeaderView> {
+    let header_range = icmp_start..icmp_start + ICMP_HEADER_PREFIX_LEN;
+    if frame.len() < header_range.end {
+        return None;
+    }
+    Some(IcmpHeaderView {
+        msg_type: frame[icmp_start],
+        code: frame[icmp_start + 1],
+        eth_frame_index,
+        header_range,
     })
 }
 

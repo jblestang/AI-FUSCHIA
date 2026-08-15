@@ -782,6 +782,14 @@ mod tests {
                 self.view = Some(view);
                 Ok(())
             }
+
+            fn receive_icmp_message(
+                &mut self,
+                _device: &FakeDeviceId,
+                _view: crate::view::ReceivedIcmpMessageView,
+            ) -> Result<(), IpsReceiveError> {
+                Ok(())
+            }
         }
 
         let state = IpsState::new();

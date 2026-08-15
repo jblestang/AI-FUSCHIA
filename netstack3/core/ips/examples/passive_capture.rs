@@ -35,7 +35,8 @@ mod linux {
     use netstack3_base::{DeviceIdentifier, StrongDeviceIdentifier, WeakDeviceIdentifier};
     use netstack3_ips::{
         diagnose_ingress_rejection, IpsReceiveBindingsContext, IpsReceiveError, IpsState,
-        ReceivedTcpSegmentView, ReceivedUdpDatagramView, process_ethernet_frame,
+        ReceivedIcmpMessageView, ReceivedTcpSegmentView, ReceivedUdpDatagramView,
+        process_ethernet_frame,
     };
     use packet::Buf;
 
@@ -118,6 +119,7 @@ mod linux {
         frames_rejected: u64,
         udp_delivered: u64,
         tcp_delivered: u64,
+        icmp_delivered: u64,
         l7_queue_full: u64,
     }
 
@@ -162,6 +164,10 @@ mod linux {
         fn note_tcp(&mut self, _view: &ReceivedTcpSegmentView) {
             self.stats.tcp_delivered += 1;
         }
+
+        fn note_icmp(&mut self, _view: &ReceivedIcmpMessageView) {
+            self.stats.icmp_delivered += 1;
+        }
     }
 
     impl IpsReceiveBindingsContext<CaptureDeviceId> for FlowAnalyzer {
@@ -182,6 +188,15 @@ mod linux {
             self.note_tcp(&view);
             Ok(())
         }
+
+        fn receive_icmp_message(
+            &mut self,
+            _device_id: &CaptureDeviceId,
+            view: ReceivedIcmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            self.note_icmp(&view);
+            Ok(())
+        }
     }
 
     fn usage() -> ! {
@@ -189,7 +204,7 @@ mod linux {
             "Usage: passive_capture --interface IFACE [--promisc]\n\
              \n\
              Passive read-only IDS tap using AF_PACKET (no transmit, no inline modification).\n\
-             Logs only frames rejected by IPS ingress (malformed/non-IP/non-L4/truncated).\n\
+             Logs only frames rejected by IPS ingress (malformed/non-IP/unsupported L4/truncated).\n\
              Point IFACE at a SPAN/mirror port or dedicated sniff NIC — not the live gateway path."
         );
         std::process::exit(2);
