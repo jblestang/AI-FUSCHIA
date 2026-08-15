@@ -741,7 +741,7 @@ impl<D: WeakDeviceIdentifier> IgmpTimerId<D> {
     }
 
     /// Creates a new [`IgmpTimerId`] for `device`.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub const fn new(device: D) -> Self {
         Self(GmpTimerId::new(device))
     }
@@ -935,7 +935,7 @@ impl gmp::v2::ProtocolConfig for IgmpConfig {
 /// The counter type `C` is generic to facilitate testing.
 #[derive(Default, Debug)]
 #[cfg_attr(
-    any(test, feature = "testutils"),
+    any(test, feature = "testutils", feature = "benchmark-harness"),
     derive(PartialEq, netstack3_macros::CounterCollection)
 )]
 pub struct IgmpCounters<C = Counter> {

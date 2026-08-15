@@ -172,7 +172,7 @@ pub trait SocketOpsFilterBindingContext<D>: TxMetadataBindingsTypes {
     fn socket_ops_filter(&self) -> impl SocketOpsFilter<D>;
 }
 
-#[cfg(any(test, feature = "testutils"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
 impl<
     TimerId: Debug + PartialEq + Clone + Send + Sync + 'static,
     Event: Debug + 'static,

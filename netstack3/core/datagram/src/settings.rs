@@ -34,7 +34,7 @@ impl Default for DatagramSettings {
     }
 }
 
-#[cfg(any(test, feature = "testutils"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
 impl AsRef<DatagramSettings> for DatagramSettings {
     fn as_ref(&self) -> &DatagramSettings {
         self

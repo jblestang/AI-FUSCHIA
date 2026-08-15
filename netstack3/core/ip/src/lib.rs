@@ -96,7 +96,7 @@ pub mod device {
     };
 
     /// IP device test utilities.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub mod testutil {
         pub use crate::internal::device::slaac::testutil::{
             calculate_slaac_addr_sub, collect_slaac_timers_integration,
@@ -139,7 +139,7 @@ pub mod icmp {
     };
 
     /// ICMP test utilities.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub mod testutil {
         pub use crate::internal::icmp::testutil::{
             neighbor_advertisement_ip_packet, neighbor_solicitation_ip_packet,
@@ -171,7 +171,7 @@ pub mod nud {
     };
 
     /// NUD test utilities.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub mod testutil {
         pub use crate::internal::device::nud::testutil::{
             FakeLinkResolutionNotifier, assert_dynamic_neighbor_state,
@@ -191,7 +191,7 @@ pub mod socket {
     };
 
     /// IP Socket test utilities.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub mod testutil {
         pub use crate::internal::socket::testutil::{
             FakeDeviceConfig, FakeDualStackIpSocketCtx, FakeIpSocketCtx, InnerFakeIpSocketCtx,
@@ -272,7 +272,7 @@ pub use internal::types::{
 };
 
 /// IP layer test utilities.
-#[cfg(any(test, feature = "testutils"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
 pub mod testutil {
     pub use crate::internal::base::testutil::DualStackSendIpPacketMeta;
     pub use crate::internal::counters::testutil::IpCounterExpectations;

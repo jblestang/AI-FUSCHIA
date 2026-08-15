@@ -974,7 +974,7 @@ impl<'a, A: IpAddress> TryFrom<&TcpSegmentBuilderWithOptions<A, TcpOptionsBuilde
     }
 }
 
-#[cfg(any(test, feature = "testutils"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
 mod testutils {
     use super::*;
 

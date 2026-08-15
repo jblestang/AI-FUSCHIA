@@ -297,7 +297,7 @@ impl<I: Ip, D: WeakDeviceIdentifier, A: WeakIpAddressId<I::Addr>> DadTimerId<I, 
     }
 
     /// Creates a new [`DadTimerId`]  for `device_id` and `addr`.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub fn new(device_id: D, addr: A) -> Self {
         Self { device_id, addr, _marker: IpVersionMarker::new() }
     }

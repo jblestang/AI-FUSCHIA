@@ -49,7 +49,7 @@ pub struct Ipv6RouteDiscoveryState<BT: Ipv6RouteDiscoveryBindingsTypes> {
 
 impl<BT: Ipv6RouteDiscoveryBindingsTypes> Ipv6RouteDiscoveryState<BT> {
     /// Gets the timer heap for route discovery.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub fn timers(&self) -> &LocalTimerHeap<Ipv6DiscoveredRoute, (), BT> {
         &self.timers
     }

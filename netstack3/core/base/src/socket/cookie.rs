@@ -9,7 +9,7 @@ use static_assertions::const_assert_eq;
 ///
 /// Socket implementations set their cookie value based on the `ResourceId`.
 #[derive(Debug, Clone)]
-#[cfg_attr(any(test, feature = "testutils"), derive(PartialEq, Eq, PartialOrd, Ord))]
+#[cfg_attr(any(test, feature = "testutils", feature = "benchmark-harness"), derive(PartialEq, Eq, PartialOrd, Ord))]
 pub struct SocketCookie {
     token: ResourceToken<'static>,
 }

@@ -10,7 +10,9 @@ name = "netstack3_udp"
 [features]
 testutils = ["instrumented"]
 instrumented = []
-benchmark = ["testutils", "netstack3_base/testutils", "netstack3_base/single-threaded", "netstack3_ip/testutils", "netstack3_filter/testutils", "netstack3_datagram/testutils", "dep:criterion"]
+benchmark-harness = []
+benchmark = ["benchmark-harness", "netstack3_base/benchmark-harness", "netstack3_ip/benchmark-harness", "netstack3_filter/benchmark-harness", "netstack3_datagram/benchmark-harness", "dep:criterion"]
+benchmark-instrumented = ["benchmark", "testutils", "instrumented", "netstack3_base/testutils", "netstack3_ip/testutils", "netstack3_filter/testutils", "netstack3_datagram/testutils"]
 
 [dependencies]
 criterion = { workspace = true, optional = true }

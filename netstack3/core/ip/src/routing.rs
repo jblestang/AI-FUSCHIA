@@ -140,7 +140,7 @@ impl<I: BroadcastIpExt, D: Clone + Debug + PartialEq> RoutingTable<I, D> {
     // Applies the given predicate to the entries in the routing table,
     // removing (and returning) those that yield `true` while retaining those
     // that yield `false`.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     fn del_entries<F: Fn(&Entry<I::Addr, D>) -> bool>(
         &mut self,
         predicate: F,
@@ -312,7 +312,7 @@ pub enum PacketOrigin<I: Ip, D> {
     },
 }
 
-#[cfg(any(test, feature = "testutils"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
 pub(crate) mod testutil {
     use derivative::Derivative;
     use net_types::ip::IpAddress;

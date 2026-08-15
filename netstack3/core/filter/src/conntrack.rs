@@ -100,14 +100,14 @@ impl<I: IpExt, E, BT: FilterBindingsTypes> Table<I, E, BT> {
     ///
     /// NOTE: This is usually twice the number of connections, but self-connected sockets will only
     /// have a single entry.
-    #[cfg(feature = "testutils")]
+    #[cfg(any(feature = "testutils", feature = "benchmark-harness"))]
     pub fn num_entries(&self) -> usize {
         self.inner.lock().table.len()
     }
 
     /// Removes the [`Connection`] for the flow indexed by `tuple`, if one exists,
     /// and returns it to the caller.
-    #[cfg(feature = "testutils")]
+    #[cfg(any(feature = "testutils", feature = "benchmark-harness"))]
     pub fn remove_connection(&mut self, tuple: &Tuple<I>) -> Option<Connection<I, E, BT>> {
         let mut guard = self.inner.lock();
 

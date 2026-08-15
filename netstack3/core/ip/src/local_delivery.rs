@@ -136,7 +136,7 @@ impl IpHeaderInfo<Ipv6> for Ipv6HeaderInfo<'_> {
     }
 }
 
-#[cfg(any(test, feature = "testutils"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
 pub(crate) mod testutil {
     use super::*;
     use alloc::vec::Vec;

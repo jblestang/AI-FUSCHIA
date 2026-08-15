@@ -31,7 +31,7 @@ pub trait RngContext {
     fn rng(&mut self) -> Self::Rng<'_>;
 }
 
-#[cfg(any(test, feature = "testutils"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
 pub(crate) mod testutil {
     use alloc::sync::Arc;
 

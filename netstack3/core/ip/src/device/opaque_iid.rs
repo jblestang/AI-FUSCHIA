@@ -19,11 +19,11 @@ pub struct IidSecret([u8; IID_SECRET_KEY_BYTES]);
 
 impl IidSecret {
     /// A static secret for use in tests.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub const ALL_ONES: Self = Self([1u8; IID_SECRET_KEY_BYTES]);
 
     /// A static secret for use in tests.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub const ALL_TWOS: Self = Self([2u8; IID_SECRET_KEY_BYTES]);
 
     /// Creates a new random secret with the provided `rng`.

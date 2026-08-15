@@ -147,7 +147,7 @@ pub enum DynamicNeighborUpdateSource<A> {
 #[derive(Derivative)]
 #[derivative(Debug(bound = ""))]
 #[cfg_attr(
-    any(test, feature = "testutils"),
+    any(test, feature = "testutils", feature = "benchmark-harness"),
     derivative(
         Clone(bound = "BT::TxMetadata: Clone"),
         PartialEq(bound = "BT::TxMetadata: PartialEq"),
@@ -169,7 +169,7 @@ pub enum NeighborState<D: LinkDevice, BT: NudBindingsTypes<D>> {
 #[derive(Derivative)]
 #[derivative(Debug(bound = ""))]
 #[cfg_attr(
-    any(test, feature = "testutils"),
+    any(test, feature = "testutils", feature = "benchmark-harness"),
     derivative(
         Clone(bound = "BT::TxMetadata: Clone"),
         PartialEq(bound = "BT::TxMetadata: PartialEq"),
@@ -378,7 +378,7 @@ where
 
 /// The state for an incomplete neighbor entry.
 #[derive(Debug, Derivative)]
-#[cfg_attr(any(test, feature = "testutils"), derivative(PartialEq(bound = "M: PartialEq"), Eq))]
+#[cfg_attr(any(test, feature = "testutils", feature = "benchmark-harness"), derivative(PartialEq(bound = "M: PartialEq"), Eq))]
 pub struct Incomplete<D: LinkDevice, N: LinkResolutionNotifier<D>, M> {
     transmit_counter: Option<NonZeroU16>,
     pending_frames: VecDeque<(Buf<Vec<u8>>, M)>,
@@ -387,7 +387,7 @@ pub struct Incomplete<D: LinkDevice, N: LinkResolutionNotifier<D>, M> {
     _marker: PhantomData<D>,
 }
 
-#[cfg(any(test, feature = "testutils"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
 impl<D: LinkDevice, N: LinkResolutionNotifier<D>, M: Clone> Clone for Incomplete<D, N, M> {
     fn clone(&self) -> Self {
         // Do not clone `notifiers` since the LinkResolutionNotifier type is not
@@ -415,7 +415,7 @@ impl<D: LinkDevice, N: LinkResolutionNotifier<D>, M> Drop for Incomplete<D, N, M
 impl<D: LinkDevice, N: LinkResolutionNotifier<D>, M> Incomplete<D, N, M> {
     /// Creates a new `Incomplete` entry with `pending_frames` and remaining
     /// transmits `transmit_counter`.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub fn new_with_pending_frames_and_transmit_counter(
         pending_frames: VecDeque<(Buf<Vec<u8>>, M)>,
         transmit_counter: Option<NonZeroU16>,
@@ -577,7 +577,7 @@ impl<D: LinkDevice, N: LinkResolutionNotifier<D>, M> Incomplete<D, N, M> {
 
 /// State associated with a reachable neighbor.
 #[derive(Debug, Derivative)]
-#[cfg_attr(any(test, feature = "testutils"), derivative(Clone, PartialEq, Eq))]
+#[cfg_attr(any(test, feature = "testutils", feature = "benchmark-harness"), derivative(Clone, PartialEq, Eq))]
 pub struct Reachable<D: LinkDevice, I: Instant> {
     /// The resolved link address.
     pub link_address: UnicastAddr<D::Address>,
@@ -587,7 +587,7 @@ pub struct Reachable<D: LinkDevice, I: Instant> {
 
 /// State associated with a stale neighbor.
 #[derive(Debug, Derivative)]
-#[cfg_attr(any(test, feature = "testutils"), derivative(Clone, PartialEq, Eq))]
+#[cfg_attr(any(test, feature = "testutils", feature = "benchmark-harness"), derivative(Clone, PartialEq, Eq))]
 pub struct Stale<D: LinkDevice> {
     /// The resolved link address.
     pub link_address: UnicastAddr<D::Address>,
@@ -621,7 +621,7 @@ impl<D: LinkDevice> Stale<D> {
 
 /// State associated with a neighbor in delay state.
 #[derive(Debug, Derivative)]
-#[cfg_attr(any(test, feature = "testutils"), derivative(Clone, PartialEq, Eq))]
+#[cfg_attr(any(test, feature = "testutils", feature = "benchmark-harness"), derivative(Clone, PartialEq, Eq))]
 pub struct Delay<D: LinkDevice> {
     /// The resolved link address.
     pub link_address: UnicastAddr<D::Address>,
@@ -662,7 +662,7 @@ impl<D: LinkDevice> Delay<D> {
 }
 
 #[derive(Debug, Derivative)]
-#[cfg_attr(any(test, feature = "testutils"), derivative(Clone, PartialEq, Eq))]
+#[cfg_attr(any(test, feature = "testutils", feature = "benchmark-harness"), derivative(Clone, PartialEq, Eq))]
 pub struct Probe<D: LinkDevice> {
     link_address: UnicastAddr<D::Address>,
     transmit_counter: Option<NonZeroU16>,
@@ -716,7 +716,7 @@ impl<D: LinkDevice> Probe<D> {
 }
 
 #[derive(Debug, Derivative)]
-#[cfg_attr(any(test, feature = "testutils"), derivative(Clone, PartialEq, Eq))]
+#[cfg_attr(any(test, feature = "testutils", feature = "benchmark-harness"), derivative(Clone, PartialEq, Eq))]
 pub struct Unreachable<D: LinkDevice> {
     link_address: UnicastAddr<D::Address>,
     mode: UnreachableMode,
@@ -734,7 +734,7 @@ pub struct Unreachable<D: LinkDevice> {
 ///
 /// [RFC 7048]: https://tools.ietf.org/html/rfc7048
 #[derive(Debug, Clone, Copy, Derivative)]
-#[cfg_attr(any(test, feature = "testutils"), derivative(PartialEq, Eq))]
+#[cfg_attr(any(test, feature = "testutils", feature = "benchmark-harness"), derivative(PartialEq, Eq))]
 pub(crate) enum UnreachableMode {
     WaitingForPacketSend,
     Backoff { probes_sent: NonZeroU32, packet_sent: bool },
@@ -1568,7 +1568,7 @@ impl<D: LinkDevice, BC: NudBindingsTypes<D>> DynamicNeighborState<D, BC> {
     }
 }
 
-#[cfg(any(test, feature = "testutils"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
 pub(crate) mod testutil {
     use super::*;
 
@@ -1831,7 +1831,7 @@ pub struct NudState<I: Ip, D: LinkDevice, BT: NudBindingsTypes<D>> {
 
 impl<I: Ip, D: LinkDevice, BT: NudBindingsTypes<D>> NudState<I, D, BT> {
     /// Returns current neighbors.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub fn neighbors(&self) -> &HashMap<SpecifiedAddr<I::Addr>, NeighborState<D, BT>> {
         &self.neighbors
     }
