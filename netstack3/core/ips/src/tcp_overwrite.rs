@@ -80,16 +80,18 @@ impl<'a> TcpOverwriter<'a> {
     }
 
     /// Classifies an inbound segment and patches seq/ack without payload edit.
-    pub fn prepare_inbound(&mut self) -> Result<TcpForwardAction, TcpOverwriteError> {
+    pub     fn prepare_inbound(&mut self) -> Result<TcpForwardAction, TcpOverwriteError> {
         self.validate_writable()?;
         let (raw_seq, payload_len, ack_flag, raw_ack) = self.header_fields()?;
-        let class = self.flow.classify_inbound(self.direction, raw_seq, payload_len as u32);
+        let payload_len_u32 = payload_len as u32;
+        let class = self.flow.classify_inbound(self.direction, raw_seq, payload_len_u32);
         match class {
             InboundSegmentClass::RetransmitDropped => Ok(TcpForwardAction::Suppressed),
             InboundSegmentClass::RetransmitKeptPrefix => {
                 let keep = self.flow.retrim_keep_len(self.direction, raw_seq, payload_len as u32);
+                let removed = payload_len_u32.saturating_sub(keep);
                 self.truncate_payload(keep as usize)?;
-                self.patch_headers_only(raw_seq, ack_flag, Some(raw_ack), 0)?;
+                self.patch_headers_only(raw_seq, ack_flag, Some(raw_ack), removed)?;
                 Ok(TcpForwardAction::Forward)
             }
             InboundSegmentClass::OutOfOrderHold => Ok(TcpForwardAction::Suppressed),
@@ -336,6 +338,8 @@ fn compute_ipv4_header_checksum(header_prefix: &[u8]) -> [u8; 2] {
 mod tests {
     use core::num::NonZeroU16;
 
+    use alloc::vec;
+    use alloc::vec::Vec;
     use net_types::ethernet::Mac;
     use net_types::ip::Ipv4Addr;
     use netstack3_base::NetworkSerializationContext;
@@ -434,6 +438,221 @@ mod tests {
         (frame[tcp_start + 12] >> 4) * 4
     }
 
+    fn parsed_tcp_ack(frame: &[u8], tcp_start: usize) -> u32 {
+        u32::from_be_bytes([
+            frame[tcp_start + TCP_ACK_OFFSET],
+            frame[tcp_start + TCP_ACK_OFFSET + 1],
+            frame[tcp_start + TCP_ACK_OFFSET + 2],
+            frame[tcp_start + TCP_ACK_OFFSET + 3],
+        ])
+    }
+
+    fn assert_wire_fields_and_zero_checksums(
+        frame: &[u8],
+        expected_ip_total: u16,
+        tcp_start: usize,
+    ) {
+        let ip_offset = ETHERNET_HDR_LEN_NO_TAG;
+        let ip_total = u16::from_be_bytes([
+            frame[ip_offset + IPV4_TOTAL_LEN_OFFSET],
+            frame[ip_offset + IPV4_TOTAL_LEN_OFFSET + 1],
+        ]);
+        assert_eq!(ip_total, expected_ip_total, "IPv4 total length");
+        assert_eq!(
+            [
+                frame[ip_offset + IPV4_HDR_CHECKSUM_OFFSET],
+                frame[ip_offset + IPV4_HDR_CHECKSUM_OFFSET + 1],
+            ],
+            [0, 0],
+            "IPv4 header checksum left zero for NIC offload"
+        );
+        assert_eq!(
+            [
+                frame[tcp_start + TCP_CHECKSUM_OFFSET],
+                frame[tcp_start + TCP_CHECKSUM_OFFSET + 1],
+            ],
+            [0, 0],
+            "TCP checksum left zero for NIC offload"
+        );
+    }
+
+    fn build_tcp_server_segment(payload: &[u8], seq: u32, ack: u32) -> ReceivedTcpSegmentView {
+        let tcp = TcpSegmentBuilder::new(
+            LOCAL,
+            REMOTE,
+            LOCAL_PORT,
+            REMOTE_PORT,
+            seq,
+            Some(ack),
+            65535,
+        );
+        let ip = packet_formats::ipv4::Ipv4PacketBuilder::new(
+            LOCAL,
+            REMOTE,
+            64,
+            Ipv4Proto::Proto(IpProto::Tcp),
+        );
+        let eth = EthernetFrameBuilder::new(DST_MAC, SRC_MAC, EtherType::Ipv4, 0);
+        let frame = Buf::new(payload.to_vec(), ..)
+            .wrap_in(tcp)
+            .wrap_in(ip)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner();
+
+        let frame_len = frame.len();
+        let ip_offset = ETHERNET_HDR_LEN_NO_TAG;
+        let body_start = ip_offset + HDR_PREFIX_LEN;
+        let tcp_hdr = crate::view::parse_tcp_header(&frame, 0, body_start).unwrap();
+        let payload_start = tcp_hdr.header_range.end;
+        ReceivedTcpSegmentView::new(
+            alloc::vec![Buf::new(frame, ..)],
+            alloc::vec![IpFragmentInfo {
+                eth_frame_index: 0,
+                ip_packet_range: ip_offset..frame_len,
+                identification: 1,
+                fragment_offset: 0,
+                more_fragments: false,
+                ip_body_range: body_start..frame_len,
+            }],
+            IpFragmentMetadata {
+                reassembly_outcome: ReassemblyOutcome::NotApplicable,
+                ..Default::default()
+            },
+            Some(tcp_hdr),
+            alloc::vec![(0, payload_start..frame_len)],
+            REMOTE.into(),
+            LOCAL.into(),
+        )
+    }
+
+    fn build_ipv4_tcp_fragment(
+        fragment_offset: packet_formats::ip::FragmentOffset,
+        more_fragments: bool,
+        body: Vec<u8>,
+        fragment_id: u16,
+    ) -> Buf<Vec<u8>> {
+        let mut ip = packet_formats::ipv4::Ipv4PacketBuilder::new(
+            REMOTE,
+            LOCAL,
+            64,
+            Ipv4Proto::Proto(IpProto::Tcp),
+        );
+        ip.id(fragment_id);
+        ip.mf_flag(more_fragments);
+        ip.fragment_offset(fragment_offset);
+        let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
+        let bytes = Buf::new(body, ..)
+            .wrap_in(ip)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner();
+        Buf::new(bytes, ..)
+    }
+
+    fn deliver_fragmented_tcp(payload_len: usize, seq: u32) -> ReceivedTcpSegmentView {
+        use netstack3_base::testutil::FakeDeviceId;
+
+        use crate::context::IpsReceiveBindingsContext;
+        use crate::{IpsReceiveError, IpsState, process_ethernet_frame};
+
+        const FRAGMENT_ID: u16 = 0x00_7f;
+        const FRAGMENT_BODY_LEN: usize = 104;
+
+        let tcp = TcpSegmentBuilder::new(
+            REMOTE,
+            LOCAL,
+            REMOTE_PORT,
+            LOCAL_PORT,
+            seq,
+            None,
+            65535,
+        );
+        let ip = packet_formats::ipv4::Ipv4PacketBuilder::new(
+            REMOTE,
+            LOCAL,
+            64,
+            Ipv4Proto::Proto(IpProto::Tcp),
+        );
+        let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
+        let frame = Buf::new(vec![0xAA; payload_len], ..)
+            .wrap_in(tcp)
+            .wrap_in(ip)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner();
+
+        let body_start = ETHERNET_HDR_LEN_NO_TAG + HDR_PREFIX_LEN;
+        let ip_body = frame[body_start..].to_vec();
+        assert!(
+            ip_body.len() > FRAGMENT_BODY_LEN,
+            "payload must span multiple IP fragments"
+        );
+
+        let first_body = ip_body[..FRAGMENT_BODY_LEN].to_vec();
+        let second_body = ip_body[FRAGMENT_BODY_LEN..].to_vec();
+
+        let frag0 = build_ipv4_tcp_fragment(
+            packet_formats::ip::FragmentOffset::ZERO,
+            true,
+            first_body,
+            FRAGMENT_ID,
+        );
+        let frag1 = build_ipv4_tcp_fragment(
+            packet_formats::ip::FragmentOffset::new(13).unwrap(),
+            false,
+            second_body,
+            FRAGMENT_ID,
+        );
+
+        struct Capture {
+            view: Option<ReceivedTcpSegmentView>,
+        }
+
+        impl IpsReceiveBindingsContext<FakeDeviceId> for Capture {
+            fn receive_udp_datagram(
+                &mut self,
+                _device: &FakeDeviceId,
+                _view: crate::view::ReceivedUdpDatagramView,
+            ) -> Result<(), IpsReceiveError> {
+                Ok(())
+            }
+
+            fn receive_tcp_segment(
+                &mut self,
+                _device: &FakeDeviceId,
+                view: ReceivedTcpSegmentView,
+            ) -> Result<(), IpsReceiveError> {
+                self.view = Some(view);
+                Ok(())
+            }
+        }
+
+        let state = IpsState::new();
+        let mut handler = Capture { view: None };
+        for frame in [frag0, frag1] {
+            process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frame).unwrap();
+        }
+
+        let view = handler.view.expect("reassembled");
+        assert_eq!(view.ip_fragments().len(), 2);
+        assert_eq!(
+            view.ip_fragment_metadata().reassembly_outcome,
+            ReassemblyOutcome::Complete
+        );
+        assert!(
+            view.ip_fragments().iter().any(|f| f.more_fragments),
+            "original segment must have MF set on at least one fragment"
+        );
+        view
+    }
+
     #[test]
     fn apply_edit_backpropagates_ipv4_total_len_and_checksums() {
         const ORIGINAL_PAYLOAD: usize = 80;
@@ -501,6 +720,194 @@ mod tests {
         assert_eq!(flow.c2s.delta, 40);
         assert_eq!(flow.c2s.committed_end, 1040);
         assert_eq!(view.payload_slices().iter().next().unwrap(), &[0xAA; 40]);
+    }
+
+    #[test]
+    fn apply_edit_shrinks_unfragmented_and_zeros_checksums() {
+        const ORIGINAL_PAYLOAD: usize = 64;
+        const KEEP_LEN: usize = 32;
+        const EXPECTED_IP_TOTAL: u16 = 72; // 20 IPv4 + 20 TCP + 32 payload
+
+        let mut view = build_tcp_segment(&[0xAA; ORIGINAL_PAYLOAD], 1000);
+        let tcp_start = view.tcp_header().unwrap().header_range.start;
+        let mut flow = TcpFlowState::default();
+        view.tcp_overwriter(&mut flow, TcpFlowDirection::ClientToServer)
+            .apply_edit(TcpPayloadEdit { keep_len: KEEP_LEN })
+            .expect("edit");
+
+        assert_eq!(view.payload_len(), KEEP_LEN);
+        let frame = view.eth_frames().next().unwrap();
+        assert_wire_fields_and_zero_checksums(frame, EXPECTED_IP_TOTAL, tcp_start);
+
+        let (ip_total, mf, frag_off) = parsed_ipv4_fields(frame);
+        assert_eq!(ip_total, EXPECTED_IP_TOTAL);
+        assert!(!mf);
+        assert_eq!(frag_off, 0);
+        assert_eq!(
+            frame.len(),
+            ETHERNET_HDR_LEN_NO_TAG + usize::from(EXPECTED_IP_TOTAL),
+            "frame buffer truncated to wire length"
+        );
+        assert_eq!(view.ip_fragments()[0].ip_packet_range.end, frame.len());
+    }
+
+    #[test]
+    fn apply_edit_shrinks_fragmented_tcp_to_single_fragment_clears_mf_and_total_len() {
+        const ORIGINAL_PAYLOAD: usize = 200;
+        const KEEP_LEN: usize = 32;
+        const EXPECTED_IP_TOTAL: u16 = 72; // 20 IPv4 + 20 TCP + 32 payload
+
+        let mut view = deliver_fragmented_tcp(ORIGINAL_PAYLOAD, 1000);
+        assert_eq!(view.payload_slices().len(), 2);
+
+        let mut flow = TcpFlowState::default();
+        view.tcp_overwriter(&mut flow, TcpFlowDirection::ClientToServer)
+            .apply_edit(TcpPayloadEdit { keep_len: KEEP_LEN })
+            .expect("shrink fragmented segment");
+
+        assert_eq!(view.ip_fragments().len(), 1, "must consolidate to one IP fragment");
+        assert_eq!(view.eth_frames().count(), 1, "extra fragment frames must be dropped");
+        assert_eq!(
+            view.ip_fragment_metadata().reassembly_outcome,
+            ReassemblyOutcome::NotApplicable
+        );
+
+        let frag = &view.ip_fragments()[0];
+        assert!(!frag.more_fragments, "MF metadata must be cleared");
+        assert_eq!(frag.fragment_offset, 0, "fragment offset must be reset");
+        assert_eq!(view.payload_len(), KEEP_LEN);
+
+        let frame = view.eth_frames().next().unwrap();
+        let (ip_total, mf, frag_off) = parsed_ipv4_fields(frame);
+        assert_eq!(ip_total, EXPECTED_IP_TOTAL, "IPv4 total length must match shrunk segment");
+        assert!(!mf, "IPv4 MF flag must be cleared in the on-wire header");
+        assert_eq!(frag_off, 0, "IPv4 fragment offset must be zero");
+        let tcp_start = view.tcp_header().unwrap().header_range.start;
+        assert_wire_fields_and_zero_checksums(frame, EXPECTED_IP_TOTAL, tcp_start);
+        assert_eq!(
+            frame.len(),
+            ETHERNET_HDR_LEN_NO_TAG + usize::from(EXPECTED_IP_TOTAL),
+            "consolidated frame must be truncated to wire length"
+        );
+    }
+
+    #[test]
+    fn apply_edit_keep_len_zero_drops_entire_payload() {
+        const EXPECTED_IP_TOTAL: u16 = 40; // 20 IPv4 + 20 TCP + 0 payload
+
+        let mut view = build_tcp_segment(&[0xAA; 64], 1000);
+        let tcp_start = view.tcp_header().unwrap().header_range.start;
+        let mut flow = TcpFlowState::default();
+        view.tcp_overwriter(&mut flow, TcpFlowDirection::ClientToServer)
+            .apply_edit(TcpPayloadEdit { keep_len: 0 })
+            .expect("drop all payload");
+
+        assert_eq!(view.payload_len(), 0);
+        let frame = view.eth_frames().next().unwrap();
+        assert_wire_fields_and_zero_checksums(frame, EXPECTED_IP_TOTAL, tcp_start);
+        assert_eq!(
+            frame.len(),
+            ETHERNET_HDR_LEN_NO_TAG + usize::from(EXPECTED_IP_TOTAL),
+            "frame buffer truncated to header-only segment"
+        );
+        assert_eq!(parsed_tcp_seq(frame, tcp_start), 1000);
+    }
+
+    #[test]
+    fn apply_edit_computes_checksums_in_software() {
+        use packet::ParsablePacket;
+        use packet_formats::ipv4::Ipv4Packet;
+
+        const KEEP_LEN: usize = 32;
+
+        let mut view = build_tcp_segment(&[0xAA; 64], 1000);
+        let tcp_start = view.tcp_header().unwrap().header_range.start;
+        let mut flow = TcpFlowState::default();
+        TcpOverwriter::with_checksum(
+            &mut view,
+            &mut flow,
+            TcpFlowDirection::ClientToServer,
+            TcpOverwriteChecksum::ComputeInSoftware,
+        )
+        .apply_edit(TcpPayloadEdit { keep_len: KEEP_LEN })
+        .expect("edit");
+
+        let frame = view.eth_frames().next().unwrap();
+        assert_ne!(
+            [
+                frame[tcp_start + TCP_CHECKSUM_OFFSET],
+                frame[tcp_start + TCP_CHECKSUM_OFFSET + 1],
+            ],
+            [0, 0],
+            "TCP checksum must be computed in software mode"
+        );
+
+        let ip_offset = ETHERNET_HDR_LEN_NO_TAG;
+        let mut ip_bytes = &frame[ip_offset..];
+        Ipv4Packet::parse(&mut ip_bytes, ()).expect("IPv4 header checksum valid in software mode");
+    }
+
+    #[test]
+    fn prepare_inbound_retransmit_kept_prefix_retrims_wire_fields() {
+        const EXPECTED_IP_TOTAL: u16 = 80; // 20 IPv4 + 20 TCP + 40 payload
+
+        let mut flow = TcpFlowState::default();
+        flow.apply_keep_edit(TcpFlowDirection::ClientToServer, 1000, 80, 40);
+
+        let mut view = build_tcp_segment(&[0xBB; 80], 1000);
+        let tcp_start = view.tcp_header().unwrap().header_range.start;
+        let action = view
+            .tcp_overwriter(&mut flow, TcpFlowDirection::ClientToServer)
+            .prepare_inbound()
+            .expect("retrim retransmit");
+
+        assert_eq!(action, TcpForwardAction::Forward);
+        assert_eq!(view.payload_len(), 40);
+        let frame = view.eth_frames().next().unwrap();
+        assert_wire_fields_and_zero_checksums(frame, EXPECTED_IP_TOTAL, tcp_start);
+        assert_eq!(parsed_tcp_seq(frame, tcp_start), 1000);
+    }
+
+    #[test]
+    fn prepare_inbound_new_data_mangles_seq_on_wire() {
+        let mut flow = TcpFlowState::default();
+        flow.apply_keep_edit(TcpFlowDirection::ClientToServer, 1000, 80, 40);
+
+        let mut view = build_tcp_segment(&[0xCC; 32], 1080);
+        let tcp_start = view.tcp_header().unwrap().header_range.start;
+        let action = view
+            .tcp_overwriter(&mut flow, TcpFlowDirection::ClientToServer)
+            .prepare_inbound()
+            .expect("forward new data");
+
+        assert_eq!(action, TcpForwardAction::Forward);
+        let frame = view.eth_frames().next().unwrap();
+        assert_eq!(
+            parsed_tcp_seq(frame, tcp_start),
+            1040,
+            "subsequent segment seq must reflect cumulative delta on wire"
+        );
+    }
+
+    #[test]
+    fn prepare_inbound_mangles_ack_on_wire_for_reverse_direction() {
+        let mut flow = TcpFlowState::default();
+        flow.apply_keep_edit(TcpFlowDirection::ClientToServer, 1000, 80, 40);
+
+        let mut view = build_tcp_server_segment(&[], 5000, 1080);
+        let tcp_start = view.tcp_header().unwrap().header_range.start;
+        let action = view
+            .tcp_overwriter(&mut flow, TcpFlowDirection::ServerToClient)
+            .prepare_inbound()
+            .expect("forward server ack");
+
+        assert_eq!(action, TcpForwardAction::Forward);
+        let frame = view.eth_frames().next().unwrap();
+        assert_eq!(
+            parsed_tcp_ack(frame, tcp_start),
+            1040,
+            "ACK must be clamped to committed_end on wire"
+        );
     }
 
     #[test]

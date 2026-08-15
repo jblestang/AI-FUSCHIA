@@ -153,6 +153,7 @@ impl TcpFlowState {
         payload_len: u32,
     ) -> InboundSegmentClass {
         let seg_end = raw_seq.saturating_add(payload_len);
+        let prev_hi_water = dir.state(self).sender_hi_water;
         {
             let state = dir.state_mut(self);
             state.sender_hi_water = state.sender_hi_water.max(seg_end);
@@ -178,7 +179,7 @@ impl TcpFlowState {
             return InboundSegmentClass::RetransmitKeptPrefix;
         }
 
-        if state.committed_end > 0 && raw_seq > state.committed_end && raw_seq < state.sender_hi_water
+        if state.committed_end > 0 && raw_seq > state.committed_end && raw_seq < prev_hi_water
         {
             return InboundSegmentClass::OutOfOrderHold;
         }
