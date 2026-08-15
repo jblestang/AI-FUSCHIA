@@ -8,7 +8,7 @@ license.workspace = true
 name = "netstack3_icmp_echo"
 
 [features]
-testutils = ["instrumented"]
+testutils = ["instrumented", "netstack3_base/testutils"]
 instrumented = []
 
 [dependencies]

@@ -49,8 +49,10 @@ pub trait Bencher {
 }
 
 /// An alias for the bencher used in real benchmarks.
+#[cfg(benchmark)]
 pub use criterion::Bencher as RealBencher;
 
+#[cfg(benchmark)]
 impl Bencher for RealBencher<'_> {
     fn iter<T, F: FnMut() -> T>(&mut self, inner: F) {
         criterion::Bencher::iter(self, inner)
