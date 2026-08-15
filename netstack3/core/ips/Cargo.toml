@@ -40,6 +40,10 @@ required-features = ["testutils"]
 name = "detect_forced_segmentation"
 required-features = ["testutils"]
 
+[[example]]
+name = "iterate_payload"
+required-features = ["testutils"]
+
 [[bench]]
 name = "ips_receive_throughput"
 harness = false
