@@ -98,6 +98,12 @@ struct PreparedPacket {
     meta: UdpPacketMeta<Ipv4>,
 }
 
+impl Clone for PreparedPacket {
+    fn clone(&self) -> Self {
+        Self { buffer: self.buffer.clone(), meta: self.meta.clone() }
+    }
+}
+
 fn build_ipv4_udp_packet(payload_len: usize) -> PreparedPacket {
     let local_ip: Ipv4Addr = local_ip::<Ipv4>().get();
     let remote_ip: Ipv4Addr = remote_ip::<Ipv4>().get();
@@ -119,7 +125,7 @@ fn build_ipv4_udp_packet(payload_len: usize) -> PreparedPacket {
     PreparedPacket { buffer, meta }
 }
 
-fn receive_ipv4_udp_packet(
+fn receive_ipv4_udp_packet_borrowed(
     core_ctx: &mut UdpFakeDeviceCoreCtx,
     bindings_ctx: &mut FakeUdpBindingsCtx<FakeDeviceId>,
     packet: &mut PreparedPacket,
@@ -150,6 +156,37 @@ fn receive_ipv4_udp_packet(
     assert!(result.is_ok(), "receive_ip_packet failed for dst_port={dst_port}");
 }
 
+fn receive_ipv4_udp_packet_owned(
+    core_ctx: &mut UdpFakeDeviceCoreCtx,
+    bindings_ctx: &mut FakeUdpBindingsCtx<FakeDeviceId>,
+    packet: PreparedPacket,
+    early_demux_socket: Option<
+        DualStackUdpSocketId<
+            Ipv4,
+            netstack3_base::testutil::FakeWeakDeviceId<FakeDeviceId>,
+            FakeUdpBindingsCtx<FakeDeviceId>,
+        >,
+    >,
+) {
+    let PreparedPacket { buffer, meta } = packet;
+    let UdpPacketMeta { src_ip, dst_ip, dst_port, dscp_and_ecn, .. } = meta;
+
+    let result = <UdpIpTransportContext as IpTransportContext<Ipv4, _, _>>::receive_ip_packet(
+        core_ctx,
+        bindings_ctx,
+        &FakeDeviceId,
+        Ipv4::into_recv_src_addr(src_ip),
+        SpecifiedAddr::new(dst_ip).unwrap(),
+        Buf::new(buffer, ..),
+        &mut LocalDeliveryPacketInfo {
+            header_info: FakeIpHeaderInfo { dscp_and_ecn, ..Default::default() },
+            ..Default::default()
+        },
+        early_demux_socket,
+    );
+    assert!(result.is_ok(), "receive_ip_packet failed for dst_port={dst_port}");
+}
+
 /// Registers UDP receive throughput benchmarks for IPv4 at [`TARGET_GBPS`] Gbps.
 pub fn add_benches(group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>) {
     for &payload_len in PAYLOAD_SIZES {
@@ -170,7 +207,7 @@ pub fn add_benches(group: &mut criterion::BenchmarkGroup<'_, criterion::measurem
             bencher.iter(|| {
                 let ctx_pair = ctx.as_mut();
                 for _ in 0..packet_count {
-                    receive_ipv4_udp_packet(
+                    receive_ipv4_udp_packet_borrowed(
                         ctx_pair.core_ctx,
                         ctx_pair.bindings_ctx,
                         &mut packet,
@@ -187,13 +224,32 @@ pub fn add_benches(group: &mut criterion::BenchmarkGroup<'_, criterion::measurem
 
             bencher.iter(|| {
                 let ctx_pair = ctx.as_mut();
-                receive_ipv4_udp_packet(
+                receive_ipv4_udp_packet_borrowed(
                     ctx_pair.core_ctx,
                     ctx_pair.bindings_ctx,
                     &mut packet,
                     Some(&early_demux_socket),
                 );
             });
+        });
+
+        group.bench_function(format!("{base}/per-packet-owned"), |bencher| {
+            let packet = build_ipv4_udp_packet(payload_len);
+            let BenchmarkCtx { mut ctx, early_demux_socket } = setup_connected_benchmark_ctx(&packet);
+
+            bencher.iter_batched(
+                || packet.clone(),
+                |packet| {
+                    let ctx_pair = ctx.as_mut();
+                    receive_ipv4_udp_packet_owned(
+                        ctx_pair.core_ctx,
+                        ctx_pair.bindings_ctx,
+                        packet,
+                        Some(early_demux_socket.clone()),
+                    );
+                },
+                criterion::BatchSize::SmallInput,
+            );
         });
 
         group.throughput(criterion::Throughput::Bytes(1));
@@ -216,7 +272,7 @@ pub fn profile_hot_loop(payload_len: usize, batches: Option<u64>) {
         batch += 1;
         let ctx_pair = ctx.as_mut();
         for _ in 0..packet_count {
-            receive_ipv4_udp_packet(
+            receive_ipv4_udp_packet_borrowed(
                 ctx_pair.core_ctx,
                 ctx_pair.bindings_ctx,
                 &mut packet,

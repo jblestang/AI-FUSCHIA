@@ -1806,7 +1806,16 @@ fn receive_ip_packet_early_demux<
         dscp_and_ecn: header_info.dscp_and_ecn(),
     };
 
-    let body = UdpReceiveBuffer::from_slice(packet.body());
+    let body = {
+        #[cfg(feature = "bench-receive")]
+        {
+            UdpReceiveBuffer::bench_receive_placeholder()
+        }
+        #[cfg(not(feature = "bench-receive"))]
+        {
+            UdpReceiveBuffer::from_slice(packet.body())
+        }
+    };
     let was_delivered = deliver_early_demux_socket::<I, _, _, _>(
         core_ctx,
         bindings_ctx,
@@ -1967,7 +1976,16 @@ fn receive_ip_packet<
         dscp_and_ecn: header_info.dscp_and_ecn(),
     };
 
-    let body = UdpReceiveBuffer::from_slice(packet.body());
+    let body = {
+        #[cfg(feature = "bench-receive")]
+        {
+            UdpReceiveBuffer::bench_receive_placeholder()
+        }
+        #[cfg(not(feature = "bench-receive"))]
+        {
+            UdpReceiveBuffer::from_slice(packet.body())
+        }
+    };
     let was_delivered = recipients.into_iter().fold(false, |was_delivered, lookup_result| {
         let delivered = try_dual_stack_deliver::<I, BC, CC, H>(
             core_ctx,

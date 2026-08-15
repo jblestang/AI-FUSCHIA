@@ -63,3 +63,34 @@ With `bench-receive`, the stack processes one second of 1 Gbps wire traffic in r
 - **~178 ns @ 64 B** indicates `bench-receive` was not enabled (bindings queue measured); not the stack ceiling.
 
 Criterion may extend measurement time for large `/bytes` batches (64–128 B warn they cannot finish 50 samples in 3 s).
+
+## Zero-copy API impact (vs pre-`UdpReceiveBuffer` baseline @ commit `454785a`)
+
+The harness calls UDP transport receive directly (not full IP dispatch), with `bench-receive` enabled so bindings do not queue datagrams. This measures **stack hot-path overhead** of the `UdpReceiveBuffer` / Arc API.
+
+| Variant | 64 B payload (median) | 512 B payload (median) | Notes |
+|---------|----------------------:|-----------------------:|-------|
+| Baseline (`&[u8]` payload, pre zero-copy) | **~146 ns** | **~148 ns** | `454785a` |
+| Current borrowed RX reuse (`Buf<&mut [u8]>`) | **~171 ns** | **~168 ns** | `bench-receive` placeholder (no payload copy) |
+| Current owned RX (`Buf<Vec<u8>>`, `/per-packet-owned`) | **~178 ns** | — | Vec clone outside timed section; UDP still uses placeholder under `bench-receive` |
+
+**Takeaways:**
+
+- The Arc-backed socket API adds **~20–25 ns/pkt** (~15%) vs the old `&[u8]` delivery on this VM, even when `bench-receive` skips payload storage.
+- Production bindings (`bench-receive` off) pay an additional **`Arc::from(payload)` copy** per datagram via `UdpReceiveBuffer::from_slice`.
+- IP-layer `detach_transport_body` zero-copy is **not exercised** by this harness (no `receive_ipv4_packet`); use `/per-packet-owned` as a stepping-stone for owned-buffer UDP entry.
+- **1 Gbps @ 64 B** still needs ~736 ns/pkt — both baseline and current paths retain **>4× headroom** on this host.
+
+Reproduce comparison:
+
+```bash
+# Current branch
+cargo bench -p netstack3-benchmarks --bench udp_receive_throughput -- \
+  '64B-payload/1358695pkts/1000ms/1.00Gbps-target/per-packet$'
+
+# Pre zero-copy baseline (detached worktree at 454785a)
+CARGO_TARGET_DIR=/tmp/bench-baseline-target \
+  cargo bench -p netstack3-benchmarks --manifest-path /path/to/baseline/Cargo.toml \
+  --bench udp_receive_throughput -- \
+  '64B-payload/1358695pkts/1000ms/1.00Gbps-target/per-packet$'
+```

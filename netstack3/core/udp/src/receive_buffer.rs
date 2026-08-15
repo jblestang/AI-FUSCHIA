@@ -30,6 +30,19 @@ impl UdpReceiveBuffer {
         Self { bytes }
     }
 
+    /// Placeholder payload for `bench-receive` (no bytes copied or allocated per packet).
+    #[cfg(feature = "bench-receive")]
+    #[allow(static_mut_refs)]
+    pub fn bench_receive_placeholder() -> Self {
+        static mut PLACEHOLDER: Option<Arc<[u8]>> = None;
+        unsafe {
+            if PLACEHOLDER.is_none() {
+                PLACEHOLDER = Some(Arc::from([]));
+            }
+            Self::from_arc(Arc::clone(PLACEHOLDER.as_ref().unwrap()))
+        }
+    }
+
     /// Moves an owned vec into shared storage without copying payload bytes.
     pub fn from_vec(vec: alloc::vec::Vec<u8>) -> Self {
         Self { bytes: vec.into() }
