@@ -278,6 +278,69 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_fragment_is_ignored_and_need_more() {
+        let cache = IpsFragmentCache::<Ipv4>::new();
+        let src = Ipv4Addr::new([1, 0, 0, 1]);
+        let dst = Ipv4Addr::new([2, 0, 0, 1]);
+        let key = ipv4_key(src, dst, 7, IpProto::Udp);
+
+        let first = stored(0, 104, true, 7);
+        assert!(matches!(
+            add_fragment(&cache, key, first),
+            AssemblyProgress::NeedMore
+        ));
+
+        let duplicate = stored(0, 104, true, 7);
+        assert!(matches!(
+            add_fragment(&cache, key, duplicate),
+            AssemblyProgress::NeedMore
+        ));
+    }
+
+    #[test]
+    fn premature_last_fragment_leaves_assembly_incomplete() {
+        let cache = IpsFragmentCache::<Ipv4>::new();
+        let src = Ipv4Addr::new([1, 0, 0, 1]);
+        let dst = Ipv4Addr::new([2, 0, 0, 1]);
+        let key = ipv4_key(src, dst, 8, IpProto::Udp);
+
+        assert!(matches!(
+            add_fragment(&cache, key, stored(0, 104, true, 8)),
+            AssemblyProgress::NeedMore
+        ));
+        assert!(matches!(
+            add_fragment(&cache, key, stored(26, 8, false, 8)),
+            AssemblyProgress::NeedMore
+        ));
+    }
+
+    #[test]
+    fn misaligned_mf_fragment_aborts_assembly() {
+        let cache = IpsFragmentCache::<Ipv4>::new();
+        let src = Ipv4Addr::new([1, 0, 0, 1]);
+        let dst = Ipv4Addr::new([2, 0, 0, 1]);
+        let key = ipv4_key(src, dst, 9, IpProto::Udp);
+
+        assert!(matches!(
+            add_fragment(&cache, key, stored(0, 100, true, 9)),
+            AssemblyProgress::Aborted(_)
+        ));
+    }
+
+    #[test]
+    fn empty_fragment_body_aborts_assembly() {
+        let cache = IpsFragmentCache::<Ipv4>::new();
+        let src = Ipv4Addr::new([1, 0, 0, 1]);
+        let dst = Ipv4Addr::new([2, 0, 0, 1]);
+        let key = ipv4_key(src, dst, 10, IpProto::Udp);
+
+        assert!(matches!(
+            add_fragment(&cache, key, stored(0, 0, true, 10)),
+            AssemblyProgress::Aborted(_)
+        ));
+    }
+
+    #[test]
     fn rfc5722_overlap_aborts() {
         let cache = IpsFragmentCache::<Ipv4>::new();
         let src = Ipv4Addr::new([1, 0, 0, 1]);

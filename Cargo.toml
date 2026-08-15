@@ -32,6 +32,9 @@ members = [
     "netstack3/core/ips",
     "netstack3/core"
 ]
+exclude = [
+    "netstack3/core/ips/fuzz",
+]
 
 [workspace.package]
 edition = "2024"

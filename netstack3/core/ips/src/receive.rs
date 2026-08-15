@@ -573,7 +573,7 @@ mod tests {
     use netstack3_base::testutil::FakeDeviceId;
     use netstack3_base::NetworkSerializationContext;
     use packet::{Buf, NestableSerializer as _, Serializer};
-    use packet_formats::ethernet::{EtherType, EthernetFrameBuilder};
+    use packet_formats::ethernet::{EtherType, ETHERNET_HDR_LEN_NO_TAG, EthernetFrameBuilder};
     use packet_formats::ip::{IpProto, Ipv4Proto};
     use packet_formats::tcp::TcpSegmentBuilder;
     use packet_formats::udp::UdpPacketBuilder;
@@ -1127,5 +1127,233 @@ mod tests {
 
         assert_eq!(handler.server_forwards, 1);
         assert_eq!(handler.last_server_ack, Some(1040));
+    }
+
+    fn build_ipv4_frame_with_proto(proto: Ipv4Proto, body: Vec<u8>) -> Buf<Vec<u8>> {
+        let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
+        let ip = packet_formats::ipv4::Ipv4PacketBuilder::new(remote(2), DST, 64, proto);
+        let bytes = Buf::new(body, ..)
+            .wrap_in(ip)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner();
+        Buf::new(bytes, ..)
+    }
+
+    fn build_unfragmented_udp_frame(payload: &[u8]) -> Buf<Vec<u8>> {
+        let udp = UdpPacketBuilder::new(remote(2), DST, Some(REMOTE_PORT), LOCAL_PORT);
+        let ip = packet_formats::ipv4::Ipv4PacketBuilder::new(
+            remote(2),
+            DST,
+            64,
+            Ipv4Proto::Proto(IpProto::Udp),
+        );
+        let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
+        let bytes = Buf::new(payload.to_vec(), ..)
+            .wrap_in(udp)
+            .wrap_in(ip)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner();
+        Buf::new(bytes, ..)
+    }
+
+    fn build_unfragmented_ipv6_udp_frame(payload: &[u8]) -> Buf<Vec<u8>> {
+        use net_types::ip::Ipv6Addr;
+        use packet_formats::ip::Ipv6Proto;
+        use packet_formats::ipv6::Ipv6PacketBuilder;
+
+        const SRC_V6: Ipv6Addr = Ipv6Addr::new([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]);
+        const DST_V6: Ipv6Addr = Ipv6Addr::new([0x2001, 0xdb8, 0, 0, 0, 0, 0, 2]);
+
+        let udp = UdpPacketBuilder::new(SRC_V6, DST_V6, Some(REMOTE_PORT), LOCAL_PORT);
+        let ip = Ipv6PacketBuilder::new(SRC_V6, DST_V6, 64, Ipv6Proto::Proto(IpProto::Udp));
+        let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv6, 0);
+        let bytes = Buf::new(payload.to_vec(), ..)
+            .wrap_in(udp)
+            .wrap_in(ip)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner();
+        Buf::new(bytes, ..)
+    }
+
+    #[test]
+    fn malformed_ethernet_frame_returns_unhandled() {
+        let state = IpsState::new();
+        let mut handler = Capture { views: Vec::new() };
+        let frame = Buf::new(vec![0u8; 8], ..);
+        assert!(process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frame).is_err());
+        assert!(handler.views.is_empty());
+    }
+
+    #[test]
+    fn non_ip_ethertype_returns_frame_unhandled() {
+        let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Arp, 0);
+        let frame = Buf::new(vec![0u8; 8], ..)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner();
+        let state = IpsState::new();
+        let mut handler = Capture { views: Vec::new() };
+        assert!(process_ethernet_frame(&state, &mut handler, &FakeDeviceId, Buf::new(frame, ..)).is_err());
+        assert!(handler.views.is_empty());
+    }
+
+    #[test]
+    fn non_udp_tcp_ipv4_returns_frame_unhandled() {
+        let frame = build_ipv4_frame_with_proto(Ipv4Proto::Icmp, vec![0x08, 0x00, 0x00, 0x00]);
+        let state = IpsState::new();
+        let mut handler = Capture { views: Vec::new() };
+        assert!(process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frame).is_err());
+        assert!(handler.views.is_empty());
+    }
+
+    #[test]
+    fn delivers_unfragmented_udp_to_l7() {
+        const PAYLOAD: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+        let frame = build_unfragmented_udp_frame(PAYLOAD);
+        let state = IpsState::new();
+        let mut handler = Capture { views: Vec::new() };
+        process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frame).unwrap();
+        assert_eq!(handler.views.len(), 1);
+        let view = &handler.views[0];
+        assert_eq!(
+            view.ip_fragment_metadata().reassembly_outcome,
+            ReassemblyOutcome::NotApplicable
+        );
+        assert_eq!(view.payload_slices().iter().next().unwrap(), PAYLOAD);
+        match view.addrs() {
+            (IpAddr::V4(src), IpAddr::V4(dst)) => {
+                assert_eq!(src, remote(2));
+                assert_eq!(dst, DST);
+            }
+            _ => panic!("expected IPv4 addrs"),
+        }
+    }
+
+    #[test]
+    fn partial_reassembly_does_not_deliver_to_l7() {
+        const PAYLOAD_LEN: usize = 200;
+        const UDP_TOTAL: usize = 8 + PAYLOAD_LEN;
+        let frag0 = build_udp_fragment(
+            remote(2),
+            0,
+            true,
+            first_fragment_body(UDP_TOTAL, 0xAA),
+            0x2001,
+        );
+        let state = IpsState::new();
+        let mut handler = Capture { views: Vec::new() };
+        process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frag0).unwrap();
+        assert!(handler.views.is_empty(), "incomplete assembly must not reach L7");
+    }
+
+    #[test]
+    fn two_fragment_udp_reassembly_preserves_payload_bytes() {
+        const PAYLOAD_LEN: usize = 120;
+        const UDP_TOTAL: usize = 8 + PAYLOAD_LEN;
+        const FILL: u8 = 0x55;
+
+        let mut expected_payload = vec![FILL; PAYLOAD_LEN];
+        let frag0 = build_udp_fragment(
+            remote(2),
+            0,
+            true,
+            first_fragment_body(UDP_TOTAL, FILL),
+            0x2002,
+        );
+        let second_len = UDP_TOTAL - FRAGMENT_BODY_LEN;
+        let frag1 = build_udp_fragment(remote(2), 13, false, vec![FILL; second_len], 0x2002);
+
+        let state = IpsState::new();
+        let mut handler = Capture { views: Vec::new() };
+        process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frag0).unwrap();
+        process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frag1).unwrap();
+
+        assert_eq!(handler.views.len(), 1);
+        let view = &handler.views[0];
+        assert_eq!(
+            view.ip_fragment_metadata().reassembly_outcome,
+            ReassemblyOutcome::Complete
+        );
+        let mut actual = Vec::new();
+        for slice in view.payload_slices().iter() {
+            actual.extend_from_slice(slice);
+        }
+        assert_eq!(actual, expected_payload);
+    }
+
+    #[test]
+    fn rfc5722_overlap_delivers_aborted_view_with_empty_payload() {
+        const FRAG_ID: u16 = 0x3001;
+        let frag0 = build_udp_fragment(remote(2), 12, true, vec![0xAA; 104], FRAG_ID);
+        let frag1 = build_udp_fragment(remote(2), 6, true, vec![0xBB; 104], FRAG_ID);
+
+        let state = IpsState::new();
+        let mut handler = Capture { views: Vec::new() };
+        process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frag0).unwrap();
+        process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frag1).unwrap();
+
+        assert_eq!(handler.views.len(), 1);
+        let view = &handler.views[0];
+        assert_eq!(
+            view.ip_fragment_metadata().reassembly_outcome,
+            ReassemblyOutcome::AbortedRfc5722Overlap
+        );
+        assert!(view.udp_header().is_none());
+        assert_eq!(view.payload_slices().iter().map(|s| s.len()).sum::<usize>(), 0);
+    }
+
+    #[test]
+    fn ipv6_unfragmented_udp_delivers_to_l7() {
+        const PAYLOAD: &[u8] = &[0x11, 0x22, 0x33];
+        let frame = build_unfragmented_ipv6_udp_frame(PAYLOAD);
+        let state = IpsState::new();
+        let mut handler = Capture { views: Vec::new() };
+        process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frame).unwrap();
+        assert_eq!(handler.views.len(), 1);
+        match handler.views[0].addrs() {
+            (IpAddr::V6(_), IpAddr::V6(_)) => {}
+            _ => panic!("expected IPv6 addrs"),
+        }
+        assert_eq!(handler.views[0].payload_slices().iter().next().unwrap(), PAYLOAD);
+    }
+
+    #[test]
+    fn truncated_before_udp_header_returns_frame_unhandled() {
+        let frame = truncate_frame(build_unfragmented_udp_frame(&[0u8; 16]), ETHERNET_HDR_LEN_NO_TAG + 22);
+        let state = IpsState::new();
+        let mut handler = Capture { views: Vec::new() };
+        assert!(process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frame).is_err());
+        assert!(handler.views.is_empty());
+    }
+
+    mod proptests {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        proptest! {
+            #[test]
+            fn process_ethernet_frame_never_panics(raw in prop::collection::vec(any::<u8>(), 0..2048)) {
+                let state = IpsState::new();
+                let mut handler = Capture { views: Vec::new() };
+                let _ = process_ethernet_frame(
+                    &state,
+                    &mut handler,
+                    &FakeDeviceId,
+                    Buf::new(raw, ..),
+                );
+            }
+        }
     }
 }

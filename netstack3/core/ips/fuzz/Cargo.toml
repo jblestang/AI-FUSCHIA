@@ -1,0 +1,31 @@
+[workspace]
+
+[package]
+name = "netstack3-ips-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+netstack3_base = { package = "netstack3-base", path = "../../base", features = ["testutils"] }
+netstack3_ips = { package = "netstack3-ips", path = ".." }
+packet = { path = "../../../../libs/packet" }
+net_types = { package = "net-types", path = "../../../../libs/net-types" }
+
+[[bin]]
+name = "process_ethernet_frame"
+path = "fuzz_targets/process_ethernet_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "add_fragment"
+path = "fuzz_targets/add_fragment.rs"
+test = false
+doc = false
+bench = false

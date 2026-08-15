@@ -443,6 +443,7 @@ mod tests {
 
     use super::*;
     use crate::view::IpFragmentMetadata;
+    use crate::view::{IpFragmentInfo, ReassemblyOutcome};
 
     const SRC_MAC: Mac = Mac::new([0x02, 0x02, 0x02, 0x02, 0x02, 0x01]);
     const DST_MAC: Mac = Mac::new([0x02, 0x02, 0x02, 0x02, 0x02, 0x02]);
@@ -757,6 +758,89 @@ mod tests {
         assert_eq!(
             view.payload_slices().iter().next().unwrap(),
             &[0x10, 0x20, 0x30, 0x40][..]
+        );
+    }
+
+    fn view_with_reassembly_outcome(outcome: ReassemblyOutcome) -> ReceivedUdpDatagramView {
+        let payload = &[0xAA; 8];
+        let udp = UdpPacketBuilder::new(REMOTE, LOCAL, Some(REMOTE_PORT), LOCAL_PORT);
+        let ip = packet_formats::ipv4::Ipv4PacketBuilder::new(
+            REMOTE,
+            LOCAL,
+            64,
+            Ipv4Proto::Proto(IpProto::Udp),
+        );
+        let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
+        let frame = Buf::new(payload.to_vec(), ..)
+            .wrap_in(udp)
+            .wrap_in(ip)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner();
+
+        let frame_len = frame.len();
+        let ip_offset = ETHERNET_HDR_LEN_NO_TAG;
+        let body_start = ip_offset + HDR_PREFIX_LEN;
+        let payload_start = body_start + HEADER_BYTES;
+        ReceivedUdpDatagramView::new(
+            alloc::vec![Buf::new(frame, ..)],
+            alloc::vec![IpFragmentInfo {
+                eth_frame_index: 0,
+                ip_packet_range: ip_offset..frame_len,
+                identification: 1,
+                fragment_offset: 0,
+                more_fragments: false,
+                ip_body_range: body_start..frame_len,
+            }],
+            IpFragmentMetadata {
+                reassembly_outcome: outcome,
+                ..Default::default()
+            },
+            Some(UdpHeaderView {
+                src_port: REMOTE_PORT.get(),
+                dst_port: LOCAL_PORT.get(),
+                length: u16::try_from(HEADER_BYTES + payload.len()).unwrap(),
+                eth_frame_index: 0,
+                header_range: body_start..payload_start,
+            }),
+            alloc::vec![(0, payload_start..frame_len)],
+            LOCAL.into(),
+            REMOTE.into(),
+        )
+    }
+
+    #[test]
+    fn overwrite_rejects_aborted_reassembly() {
+        let mut view = view_with_reassembly_outcome(ReassemblyOutcome::AbortedRfc5722Overlap);
+        let err = view
+            .udp_overwriter()
+            .overwrite_payload(&[0xBB; 8])
+            .expect_err("aborted assembly must not be writable");
+        assert_eq!(err, UdpOverwriteError::ReassemblyAborted);
+    }
+
+    #[test]
+    fn overwrite_rejects_incomplete_reassembly() {
+        let mut view = view_with_reassembly_outcome(ReassemblyOutcome::Incomplete);
+        let err = view
+            .udp_overwriter()
+            .overwrite_payload(&[0xBB; 8])
+            .expect_err("incomplete assembly must not be writable");
+        assert_eq!(err, UdpOverwriteError::ReassemblyIncomplete);
+    }
+
+    #[test]
+    fn overwrite_in_place_length_mismatch_errors() {
+        let mut view = build_unfragmented_udp(&[0xAA; 8]);
+        let err = view
+            .udp_overwriter()
+            .overwrite_payload_in_place(&[0xBB; 4])
+            .expect_err("length mismatch");
+        assert_eq!(
+            err,
+            UdpOverwriteError::PayloadLengthMismatch { expected: 8, got: 4 }
         );
     }
 }
