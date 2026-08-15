@@ -10,9 +10,11 @@ name = "netstack3_core"
 [features]
 instrumented = []
 testutils = ["instrumented"]
+benchmark = ["netstack3_base/benchmark", "netstack3_udp/benchmark", "dep:criterion"]
 
 [dependencies]
 assert_matches = { workspace = true }
+criterion = { workspace = true, optional = true }
 derivative = { workspace = true, features = ["use_core"] }
 lock_order = { package = "lock-order", path = "lock-order" }
 log = { workspace = true }
@@ -32,3 +34,8 @@ netstack3_udp = { package = "netstack3-udp", path = "udp" }
 packet = { path = "../../libs/packet" }
 packet_formats = { package = "packet_formats", path = "../../libs/packet-formats" }
 zerocopy = { workspace = true, features = ["derive"] }
+
+[[bench]]
+name = "netstack3"
+harness = false
+required-features = ["benchmark"]

@@ -11,13 +11,14 @@ name = "netstack3_base"
 testutils = ["instrumented", "netstack3_sync/testutils", "benchmark", "dep:net_declare", "dep:teststd", "dep:assert_matches", "dep:rand_xorshift"]
 instrumented = ["netstack3_sync/instrumented"]
 single-threaded = ["netstack3_sync/single-threaded"]
-benchmark = ["single-threaded", "netstack3_sync/benchmark", "dep:net_declare", "dep:teststd", "dep:assert_matches", "dep:rand_xorshift"]
+benchmark = ["single-threaded", "netstack3_sync/benchmark", "dep:criterion", "dep:net_declare", "dep:teststd", "dep:assert_matches", "dep:rand_xorshift"]
 
 [dependencies]
 arc-swap = { workspace = true }
 arrayvec = { workspace = true }
 assert_matches = { workspace = true, optional = true }
 bitflags = { workspace = true }
+criterion = { workspace = true, optional = true }
 derivative = { workspace = true, features = ["use_core"] }
 diagnostics_traits = { package = "diagnostics-traits", path = "../../../libs/diagnostics-traits" }
 either = { workspace = true }

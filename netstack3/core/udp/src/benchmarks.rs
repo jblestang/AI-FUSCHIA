@@ -6,7 +6,7 @@
 
 use core::num::NonZeroU16;
 
-use criterion::{BenchmarkGroup, Criterion, Throughput, measurement::WallTime};
+use criterion::{BenchmarkGroup, Throughput, measurement::WallTime};
 use net_types::Witness as _;
 use net_types::ip::{Ipv4, Ipv4Addr};
 use net_types::{SpecifiedAddr, ZonedAddr};
@@ -153,10 +153,14 @@ fn receive_ipv4_udp_packet(
 
 /// Registers UDP receive throughput benchmarks for IPv4 at [`TARGET_GBPS`] Gbps.
 ///
-/// For each payload size, registers two Criterion cases:
+/// Registers into the provided Criterion group (typically
+/// `"netstack3/udp/receive_throughput"`, configured via
+/// [`netstack3_base::benchmarks::configure_group`]).
+///
+/// For each payload size, registers two cases:
 /// - `.../bytes` — one iteration processes a full [`BATCH_DURATION`] batch; throughput in MiB/s/GiB/s.
 /// - `.../per-packet` — one iteration receives a single datagram; `time` is wall time per packet (ns/µs).
-pub fn add_udp_receive_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
+pub fn add_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
     for &payload_len in PAYLOAD_SIZES {
         let wire_bytes = ipv4_udp_wire_bytes(payload_len);
         let packet_count = packets_for_rate(wire_bytes, BATCH_DURATION);
@@ -233,16 +237,6 @@ pub fn profile_hot_loop(payload_len: usize, batches: Option<u64>) {
             );
         }
     }
-}
-
-/// Registers all UDP benchmarks on the provided criterion instance.
-pub fn add_benches(c: &mut Criterion) {
-    let mut group = c.benchmark_group("netstack3/udp/receive_throughput");
-    group.warm_up_time(core::time::Duration::from_millis(500));
-    group.measurement_time(core::time::Duration::from_secs(3));
-    group.sample_size(50);
-    add_udp_receive_benches(&mut group);
-    group.finish();
 }
 
 #[cfg(test)]

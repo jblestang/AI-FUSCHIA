@@ -344,7 +344,7 @@ pub(crate) mod tests {
     }
 }
 
-#[cfg(any(test, benchmark))]
+#[cfg(any(test, feature = "benchmark"))]
 pub(crate) mod benchmarks {
     use super::*;
 
@@ -378,7 +378,7 @@ pub(crate) mod benchmarks {
     // Call `try_take` at 2x the enforced rate.
     bench!(bench_try_take_double_rate, |b| bench_try_take(b, 64, 64 * 2));
 
-    #[cfg(benchmark)]
+    #[cfg(feature = "benchmark")]
     pub fn add_benches(
         group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     ) {

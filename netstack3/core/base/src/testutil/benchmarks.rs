@@ -6,7 +6,7 @@
 
 /// Declare a benchmark function.
 ///
-/// If `cfg(benchmark)` is enabled, a function named `name` is emitted and it
+/// If the `benchmark` feature is enabled, a function named `name` is emitted and it
 /// receives [`RealBencher`].
 ///
 /// If `cfg(test)` is enabled, a module named `name` with a single test called
@@ -20,7 +20,7 @@
 #[macro_export]
 macro_rules! bench {
     ($name:ident, $fn:expr) => {
-        #[cfg(benchmark)]
+        #[cfg(feature = "benchmark")]
         pub(crate) fn $name(b: &mut $crate::testutil::RealBencher<'_>) {
             $fn(b);
         }
@@ -49,10 +49,10 @@ pub trait Bencher {
 }
 
 /// An alias for the bencher used in real benchmarks.
-#[cfg(benchmark)]
+#[cfg(feature = "benchmark")]
 pub use criterion::Bencher as RealBencher;
 
-#[cfg(benchmark)]
+#[cfg(feature = "benchmark")]
 impl Bencher for RealBencher<'_> {
     fn iter<T, F: FnMut() -> T>(&mut self, inner: F) {
         criterion::Bencher::iter(self, inner)
