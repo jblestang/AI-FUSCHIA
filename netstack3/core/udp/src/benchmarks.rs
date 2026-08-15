@@ -128,7 +128,7 @@ fn receive_ipv4_udp_packet(
     bindings_ctx: &mut FakeUdpBindingsCtx<FakeDeviceId>,
     packet: &mut PreparedPacket,
     early_demux_socket: Option<
-        DualStackUdpSocketId<Ipv4, netstack3_base::testutil::FakeWeakDeviceId<FakeDeviceId>, FakeUdpBindingsCtx<FakeDeviceId>>,
+        &DualStackUdpSocketId<Ipv4, netstack3_base::testutil::FakeWeakDeviceId<FakeDeviceId>, FakeUdpBindingsCtx<FakeDeviceId>>,
     >,
 ) {
     let PreparedPacket { buffer, meta } = packet;
@@ -146,7 +146,7 @@ fn receive_ipv4_udp_packet(
             header_info: FakeIpHeaderInfo { dscp_and_ecn: *dscp_and_ecn, ..Default::default() },
             ..Default::default()
         },
-        early_demux_socket,
+        early_demux_socket.cloned(),
     );
     assert!(result.is_ok(), "receive_ip_packet failed for dst_port={dst_port}");
 }
@@ -179,7 +179,7 @@ pub fn add_udp_receive_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
                         ctx_pair.core_ctx,
                         ctx_pair.bindings_ctx,
                         &mut packet,
-                        Some(early_demux_socket.clone()),
+                        Some(&early_demux_socket),
                     );
                 }
             });
@@ -196,7 +196,7 @@ pub fn add_udp_receive_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
                     ctx_pair.core_ctx,
                     ctx_pair.bindings_ctx,
                     &mut packet,
-                    Some(early_demux_socket.clone()),
+                    Some(&early_demux_socket),
                 );
             });
         });
@@ -229,7 +229,7 @@ pub fn profile_hot_loop(payload_len: usize, batches: Option<u64>) {
                 ctx_pair.core_ctx,
                 ctx_pair.bindings_ctx,
                 &mut packet,
-                Some(early_demux_socket.clone()),
+                Some(&early_demux_socket),
             );
         }
     }
@@ -279,7 +279,7 @@ mod tests {
                 ctx_pair.core_ctx,
                 ctx_pair.bindings_ctx,
                 &mut packet,
-                Some(early_demux_socket.clone()),
+                Some(&early_demux_socket),
             );
         }
     }
