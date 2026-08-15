@@ -27,6 +27,11 @@ impl BridgeHost {
         Ok(Self { ctx, eth, tap })
     }
 
+    /// Mutable access to the stack context (for socket APIs).
+    pub fn ctx_mut(&mut self) -> &mut FakeCtx {
+        &mut self.ctx
+    }
+
     pub fn pump_once(&mut self) -> io::Result<bool> {
         let mut progress = false;
 
@@ -74,7 +79,20 @@ impl BridgeHost {
         Ok(())
     }
 
-    pub fn run(&mut self, idle_timeout: Duration) -> io::Result<()> {
+    pub fn run_udp_listener(
+        &mut self,
+        port: core::num::NonZeroU16,
+        idle_timeout: Duration,
+    ) -> io::Result<()> {
+        let socket = super::udp::bind_listener(self, port)?;
+        log::info!(
+            "UDP listening on {}:{} — send with: echo -n hi | nc -u {} {}",
+            Ipv4::TEST_ADDRS.local_ip,
+            port,
+            Ipv4::TEST_ADDRS.local_ip,
+            port,
+        );
+
         let mut pollfd = nix::libc::pollfd {
             fd: self.tap.as_raw_fd(),
             events: nix::libc::POLLIN,
@@ -83,6 +101,7 @@ impl BridgeHost {
 
         loop {
             self.pump_until_idle()?;
+            super::udp::drain_received(self, &socket, port);
 
             let timeout_ms = idle_timeout.as_millis().try_into().unwrap_or(i32::MAX);
             let ret = unsafe { nix::libc::poll(&mut pollfd, 1, timeout_ms) };
@@ -98,6 +117,7 @@ impl BridgeHost {
             }
             if pollfd.revents & nix::libc::POLLIN != 0 {
                 self.pump_until_idle()?;
+                super::udp::drain_received(self, &socket, port);
             }
         }
     }
