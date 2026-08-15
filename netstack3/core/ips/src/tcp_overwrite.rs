@@ -3,6 +3,10 @@
 // found in the LICENSE file.
 
 //! In-place TCP prefix-keep edits with sequence/ACK mangling.
+//!
+//! v1 scope: **established-flow data segments only** — segments carrying SYN, FIN,
+//! or RST are rejected by [`TcpOverwriter::apply_edit`]. Control flags are still
+//! observed on the [`TcpOverwriter::prepare_inbound`] path for flow teardown.
 
 use internet_checksum::Checksum;
 use net_types::ip::{IpAddr, Ipv4Addr};
@@ -19,6 +23,9 @@ const TCP_SEQ_OFFSET: usize = 4;
 const TCP_ACK_OFFSET: usize = 8;
 const TCP_FLAGS_OFFSET: usize = 13;
 const TCP_CHECKSUM_OFFSET: usize = 16;
+const TCP_OPTION_KIND_NOP: u8 = 1;
+const TCP_OPTION_KIND_SACK_PERMITTED: u8 = 4;
+const TCP_OPTION_KIND_SACK: u8 = 5;
 
 /// How [`TcpOverwriter`] updates checksum fields after a rewrite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -51,6 +58,8 @@ pub enum TcpOverwriteError {
     MissingTcpHeader,
     UnsupportedIpVersion,
     KeepLenExceedsPayload { keep_len: usize, payload_len: usize },
+    /// Segment carries SYN, FIN, or RST; v1 edits apply to established data only.
+    ControlSegmentNotEditable,
     UnknownFlow,
 }
 
@@ -80,8 +89,11 @@ impl<'a> TcpOverwriter<'a> {
     }
 
     /// Classifies an inbound segment and patches seq/ack without payload edit.
-    pub     fn prepare_inbound(&mut self) -> Result<TcpForwardAction, TcpOverwriteError> {
+    pub fn prepare_inbound(&mut self) -> Result<TcpForwardAction, TcpOverwriteError> {
         self.validate_writable()?;
+        if let Some(hdr) = self.view.tcp_header() {
+            self.flow.note_control_flags(self.direction, hdr.fin_flag, hdr.rst_flag);
+        }
         let (raw_seq, payload_len, ack_flag, raw_ack) = self.header_fields()?;
         let payload_len_u32 = payload_len as u32;
         let class = self.flow.classify_inbound(self.direction, raw_seq, payload_len_u32);
@@ -110,6 +122,7 @@ impl<'a> TcpOverwriter<'a> {
     /// L7 validated prefix; drop incomplete tail and update flow state.
     pub fn apply_edit(&mut self, edit: TcpPayloadEdit) -> Result<(), TcpOverwriteError> {
         self.validate_writable()?;
+        self.validate_established_data_segment()?;
         let (raw_seq, payload_len, ack_flag, raw_ack) = self.header_fields()?;
         let payload_len_u32 = payload_len as u32;
         if edit.keep_len > payload_len {
@@ -167,6 +180,9 @@ impl<'a> TcpOverwriter<'a> {
                 buf[tcp_start + TCP_ACK_OFFSET..tcp_start + TCP_ACK_OFFSET + 4]
                     .copy_from_slice(&a.to_be_bytes());
             }
+        }
+        if self.flow.has_mangling() || removing_from_this_segment > 0 {
+            strip_sack_options(buf, tcp_start, tcp_hdr.data_offset_bytes as usize);
         }
         self.refresh_lengths_and_checksums(frame_index, tcp_start)?;
         Ok(())
@@ -268,6 +284,14 @@ impl<'a> TcpOverwriter<'a> {
         Ok(())
     }
 
+    fn validate_established_data_segment(&self) -> Result<(), TcpOverwriteError> {
+        let hdr = self.view.tcp_header().ok_or(TcpOverwriteError::MissingTcpHeader)?;
+        if hdr.syn_flag || hdr.fin_flag || hdr.rst_flag {
+            return Err(TcpOverwriteError::ControlSegmentNotEditable);
+        }
+        Ok(())
+    }
+
     fn validate_writable(&self) -> Result<(), TcpOverwriteError> {
         match self.view.ip_fragment_metadata().reassembly_outcome {
             ReassemblyOutcome::AbortedRfc5722Overlap => return Err(TcpOverwriteError::ReassemblyAborted),
@@ -332,6 +356,41 @@ fn compute_ipv4_header_checksum(header_prefix: &[u8]) -> [u8; 2] {
     let mut checksum = Checksum::new();
     checksum.add_bytes(header_prefix);
     checksum.checksum()
+}
+
+/// Replaces SACK-related TCP options with NOPs so seq references cannot disagree
+/// with mangled stream state. Header length is preserved.
+fn strip_sack_options(buf: &mut [u8], tcp_start: usize, data_offset: usize) {
+    if data_offset <= 20 {
+        return;
+    }
+    let opts_start = tcp_start + 20;
+    let opts_end = tcp_start + data_offset;
+    if opts_end > buf.len() {
+        return;
+    }
+    let mut i = opts_start;
+    while i < opts_end {
+        let kind = buf[i];
+        if kind == 0 {
+            break;
+        }
+        if kind == TCP_OPTION_KIND_NOP {
+            i += 1;
+            continue;
+        }
+        if i + 1 >= opts_end {
+            break;
+        }
+        let len = buf[i + 1] as usize;
+        if len < 2 || i + len > opts_end {
+            break;
+        }
+        if kind == TCP_OPTION_KIND_SACK_PERMITTED || kind == TCP_OPTION_KIND_SACK {
+            buf[i..i + len].fill(TCP_OPTION_KIND_NOP);
+        }
+        i += len;
+    }
 }
 
 #[cfg(test)]
@@ -943,5 +1002,153 @@ mod tests {
             false,
         );
         assert_eq!(seq, 1040);
+    }
+
+    fn build_syn_segment(payload: &[u8]) -> ReceivedTcpSegmentView {
+        let mut tcp = TcpSegmentBuilder::new(
+            REMOTE,
+            LOCAL,
+            REMOTE_PORT,
+            LOCAL_PORT,
+            1000,
+            None,
+            65535,
+        );
+        tcp.syn(true);
+        let ip = packet_formats::ipv4::Ipv4PacketBuilder::new(
+            REMOTE,
+            LOCAL,
+            64,
+            Ipv4Proto::Proto(IpProto::Tcp),
+        );
+        let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
+        let frame = Buf::new(payload.to_vec(), ..)
+            .wrap_in(tcp)
+            .wrap_in(ip)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner();
+
+        let frame_len = frame.len();
+        let ip_offset = ETHERNET_HDR_LEN_NO_TAG;
+        let body_start = ip_offset + HDR_PREFIX_LEN;
+        let tcp_hdr = crate::view::parse_tcp_header(&frame, 0, body_start).unwrap();
+        assert!(tcp_hdr.syn_flag);
+        let payload_start = tcp_hdr.header_range.end;
+        ReceivedTcpSegmentView::new(
+            alloc::vec![Buf::new(frame, ..)],
+            alloc::vec![IpFragmentInfo {
+                eth_frame_index: 0,
+                ip_packet_range: ip_offset..frame_len,
+                identification: 1,
+                fragment_offset: 0,
+                more_fragments: false,
+                ip_body_range: body_start..frame_len,
+            }],
+            IpFragmentMetadata {
+                reassembly_outcome: ReassemblyOutcome::NotApplicable,
+                ..Default::default()
+            },
+            Some(tcp_hdr),
+            alloc::vec![(0, payload_start..frame_len)],
+            LOCAL.into(),
+            REMOTE.into(),
+        )
+    }
+
+    #[test]
+    fn apply_edit_rejects_syn_segment() {
+        let mut view = build_syn_segment(&[0xAA; 8]);
+        let mut flow = TcpFlowState::default();
+        let err = view
+            .tcp_overwriter(&mut flow, TcpFlowDirection::ClientToServer)
+            .apply_edit(TcpPayloadEdit { keep_len: 4 })
+            .expect_err("SYN must not be editable");
+        assert_eq!(err, TcpOverwriteError::ControlSegmentNotEditable);
+    }
+
+    #[test]
+    fn strip_sack_options_replaces_sack_with_nop() {
+        let tcp_start = 50usize;
+        let mut frame = vec![0u8; 100];
+        frame[tcp_start + 12] = 0x80; // 32-byte header
+        frame[tcp_start + 13] = 0x10; // ACK
+        // options: SACK permitted (4, 2) + padding NOPs to 24 bytes
+        frame[tcp_start + 20] = TCP_OPTION_KIND_SACK_PERMITTED;
+        frame[tcp_start + 21] = 2;
+        frame[tcp_start + 22] = TCP_OPTION_KIND_SACK;
+        frame[tcp_start + 23] = 10;
+        for b in &mut frame[tcp_start + 24..tcp_start + 32] {
+            *b = 0xAB;
+        }
+
+        strip_sack_options(&mut frame, tcp_start, 32);
+        assert_eq!(frame[tcp_start + 20], TCP_OPTION_KIND_NOP);
+        assert_eq!(frame[tcp_start + 21], TCP_OPTION_KIND_NOP);
+        assert_eq!(frame[tcp_start + 22], TCP_OPTION_KIND_NOP);
+        assert_eq!(frame[tcp_start + 23..tcp_start + 32], [TCP_OPTION_KIND_NOP; 9]);
+    }
+
+    #[test]
+    fn prepare_inbound_notes_fin_for_flow_teardown() {
+        let mut tcp = TcpSegmentBuilder::new(
+            REMOTE,
+            LOCAL,
+            REMOTE_PORT,
+            LOCAL_PORT,
+            1000,
+            None,
+            65535,
+        );
+        tcp.fin(true);
+        let ip = packet_formats::ipv4::Ipv4PacketBuilder::new(
+            REMOTE,
+            LOCAL,
+            64,
+            Ipv4Proto::Proto(IpProto::Tcp),
+        );
+        let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
+        let frame = Buf::new(vec![0u8; 0], ..)
+            .wrap_in(tcp)
+            .wrap_in(ip)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner();
+
+        let frame_len = frame.len();
+        let ip_offset = ETHERNET_HDR_LEN_NO_TAG;
+        let body_start = ip_offset + HDR_PREFIX_LEN;
+        let tcp_hdr = crate::view::parse_tcp_header(&frame, 0, body_start).unwrap();
+        let payload_start = tcp_hdr.header_range.end;
+        let mut view = ReceivedTcpSegmentView::new(
+            alloc::vec![Buf::new(frame, ..)],
+            alloc::vec![IpFragmentInfo {
+                eth_frame_index: 0,
+                ip_packet_range: ip_offset..frame_len,
+                identification: 1,
+                fragment_offset: 0,
+                more_fragments: false,
+                ip_body_range: body_start..frame_len,
+            }],
+            IpFragmentMetadata {
+                reassembly_outcome: ReassemblyOutcome::NotApplicable,
+                ..Default::default()
+            },
+            Some(tcp_hdr),
+            alloc::vec![(0, payload_start..frame_len)],
+            LOCAL.into(),
+            REMOTE.into(),
+        );
+
+        let mut flow = TcpFlowState::default();
+        view.tcp_overwriter(&mut flow, TcpFlowDirection::ClientToServer)
+            .prepare_inbound()
+            .expect("forward FIN");
+        assert!(flow.fin_c2s);
+        assert!(!flow.should_evict());
     }
 }

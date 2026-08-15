@@ -4,6 +4,8 @@
 
 //! Per-flow TCP stream state for inline sequence/ACK mangling.
 
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 use core::ops::Range;
 
 use net_types::ip::IpAddr;
@@ -81,6 +83,13 @@ impl TcpFlowDirection {
     }
 }
 
+/// One prefix-keep edit on a direction, keyed by segment start seq.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TcpEditRecord {
+    pub seq: u32,
+    pub keep_len: u32,
+}
+
 /// Per-direction byte stream commit state in sender-original sequence space.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TcpDirectionState {
@@ -90,10 +99,10 @@ pub struct TcpDirectionState {
     pub committed_end: u32,
     /// Highest `seq + payload_len` observed from the sender.
     pub sender_hi_water: u32,
-    /// Bytes dropped from the last edit, in sender-original space.
-    pub dropped_range: Option<Range<u32>>,
-    /// `(seq, keep_len)` from the last payload edit on this direction.
-    pub last_edit: Option<(u32, u32)>,
+    /// Payload ranges dropped by prefix-keep edits (sender-original space).
+    pub dropped_ranges: Vec<Range<u32>>,
+    /// Prefix-keep edits applied on this direction (oldest first).
+    pub edits: Vec<TcpEditRecord>,
 }
 
 /// Bidirectional flow state for one TCP connection.
@@ -101,6 +110,12 @@ pub struct TcpDirectionState {
 pub struct TcpFlowState {
     pub c2s: TcpDirectionState,
     pub s2c: TcpDirectionState,
+    /// FIN seen on the client→server half.
+    pub fin_c2s: bool,
+    /// FIN seen on the server→client half.
+    pub fin_s2c: bool,
+    /// RST seen on either half (aborts the flow).
+    pub rst_seen: bool,
 }
 
 /// Classification of an inbound segment from the sender before L7 handling.
@@ -117,6 +132,34 @@ pub enum InboundSegmentClass {
 }
 
 impl TcpFlowState {
+    /// Returns true when the flow should be removed from the flow table.
+    pub fn should_evict(&self) -> bool {
+        self.rst_seen || (self.fin_c2s && self.fin_s2c)
+    }
+
+    /// Returns true when either direction has applied payload edits.
+    pub fn has_mangling(&self) -> bool {
+        self.c2s.delta > 0 || self.s2c.delta > 0
+    }
+
+    /// Records FIN/RST observation for flow-table lifecycle.
+    pub fn note_control_flags(
+        &mut self,
+        dir: TcpFlowDirection,
+        fin: bool,
+        rst: bool,
+    ) {
+        if rst {
+            self.rst_seen = true;
+        }
+        if fin {
+            match dir {
+                TcpFlowDirection::ClientToServer => self.fin_c2s = true,
+                TcpFlowDirection::ServerToClient => self.fin_s2c = true,
+            }
+        }
+    }
+
     /// Cumulative delta for one direction (bytes removed from that stream).
     pub fn direction_delta(&self, dir: TcpFlowDirection) -> u32 {
         dir.state(self).delta
@@ -133,13 +176,12 @@ impl TcpFlowState {
         let removed = raw_len.saturating_sub(keep_len);
         let state = dir.state_mut(self);
         state.delta = state.delta.saturating_add(removed);
-        state.committed_end = raw_seq.saturating_add(keep_len);
-        state.last_edit = Some((raw_seq, keep_len));
+        state.committed_end = state.committed_end.max(raw_seq.saturating_add(keep_len));
+        state.edits.push(TcpEditRecord { seq: raw_seq, keep_len });
         if removed > 0 {
-            state.dropped_range =
-                Some(raw_seq.saturating_add(keep_len)..raw_seq.saturating_add(raw_len));
-        } else {
-            state.dropped_range = None;
+            state.dropped_ranges.push(
+                raw_seq.saturating_add(keep_len)..raw_seq.saturating_add(raw_len),
+            );
         }
         let seg_end = raw_seq.saturating_add(raw_len);
         state.sender_hi_water = state.sender_hi_water.max(seg_end);
@@ -160,27 +202,32 @@ impl TcpFlowState {
         }
         let state = dir.state(self).clone();
 
-        if let Some(dropped) = &state.dropped_range {
+        for dropped in &state.dropped_ranges {
             if raw_seq >= dropped.start && seg_end <= dropped.end {
                 return InboundSegmentClass::RetransmitDropped;
             }
+        }
+
+        for dropped in &state.dropped_ranges {
             if raw_seq < dropped.start && seg_end > dropped.start {
                 return InboundSegmentClass::RetransmitKeptPrefix;
             }
         }
 
-        if let Some((edit_seq, keep_len)) = state.last_edit {
-            if raw_seq == edit_seq && payload_len > keep_len {
+        for edit in &state.edits {
+            if raw_seq == edit.seq && payload_len > edit.keep_len {
                 return InboundSegmentClass::RetransmitKeptPrefix;
             }
         }
 
-        if payload_len > 0 && seg_end <= state.committed_end {
+        if payload_len > 0
+            && seg_end <= state.committed_end
+            && !segment_overlaps_dropped_interior(raw_seq, seg_end, &state.dropped_ranges)
+        {
             return InboundSegmentClass::RetransmitKeptPrefix;
         }
 
-        if state.committed_end > 0 && raw_seq > state.committed_end && raw_seq < prev_hi_water
-        {
+        if state.committed_end > 0 && raw_seq > state.committed_end && raw_seq < prev_hi_water {
             return InboundSegmentClass::OutOfOrderHold;
         }
 
@@ -190,15 +237,25 @@ impl TcpFlowState {
     /// Returns the keep_len to re-apply for a [`InboundSegmentClass::RetransmitKeptPrefix`].
     pub fn retrim_keep_len(&self, dir: TcpFlowDirection, raw_seq: u32, payload_len: u32) -> u32 {
         let state = dir.state(self);
-        if let Some((edit_seq, keep_len)) = state.last_edit {
-            if raw_seq == edit_seq {
-                return keep_len.min(payload_len);
+        let seg_end = raw_seq.saturating_add(payload_len);
+
+        for edit in &state.edits {
+            if raw_seq == edit.seq {
+                return edit.keep_len.min(payload_len);
             }
         }
-        if payload_len > 0 && raw_seq.saturating_add(payload_len) <= state.committed_end {
+
+        for dropped in &state.dropped_ranges {
+            if raw_seq < dropped.start && seg_end > dropped.start {
+                return dropped.start.saturating_sub(raw_seq);
+            }
+        }
+
+        if payload_len > 0 && seg_end <= state.committed_end {
             return payload_len;
         }
-        state.last_edit.map(|(_, k)| k).unwrap_or(payload_len)
+
+        state.edits.last().map(|e| e.keep_len).unwrap_or(payload_len)
     }
 
     /// Translates seq/ack for an outbound segment (original → mangled wire values).
@@ -215,7 +272,7 @@ impl TcpFlowState {
         let ack = if ack_flag {
             raw_ack.map(|a| {
                 let adjusted = a.wrapping_sub(reverse.delta);
-        if reverse.committed_end > 0 {
+                if reverse.committed_end > 0 {
                     adjusted.min(reverse.committed_end)
                 } else {
                     adjusted
@@ -228,32 +285,158 @@ impl TcpFlowState {
     }
 }
 
-/// LRU-capable TCP flow table (simple HashMap for v1).
-#[derive(Debug, Default)]
+fn segment_overlaps_dropped_interior(
+    raw_seq: u32,
+    seg_end: u32,
+    dropped_ranges: &[Range<u32>],
+) -> bool {
+    dropped_ranges.iter().any(|dropped| {
+        raw_seq < dropped.end && seg_end > dropped.start && !(raw_seq >= dropped.start && seg_end <= dropped.end)
+    })
+}
+
+/// Configuration for [`IpsTcpFlowTable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IpsTcpFlowTableConfig {
+    /// Maximum concurrent flows before LRU eviction.
+    pub max_flows: usize,
+    /// Evict flows idle for this many table operation ticks.
+    pub idle_ticks: u64,
+}
+
+impl Default for IpsTcpFlowTableConfig {
+    fn default() -> Self {
+        Self { max_flows: 4096, idle_ticks: 300_000 }
+    }
+}
+
+struct TcpFlowEntry {
+    state: TcpFlowState,
+    last_tick: u64,
+}
+
+/// LRU flow table with idle eviction and FIN/RST teardown.
 pub struct IpsTcpFlowTable {
-    flows: HashMap<TcpFlowKey, TcpFlowState>,
+    flows: HashMap<TcpFlowKey, TcpFlowEntry>,
+    lru: VecDeque<TcpFlowKey>,
+    tick: u64,
+    config: IpsTcpFlowTableConfig,
+}
+
+impl Default for IpsTcpFlowTable {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl IpsTcpFlowTable {
+    /// Creates an empty flow table with default limits.
     pub fn new() -> Self {
-        Self { flows: HashMap::new() }
+        Self::with_config(IpsTcpFlowTableConfig::default())
     }
 
-    pub fn get_or_insert(&mut self, key: TcpFlowKey) -> &mut TcpFlowState {
-        self.flows.entry(key).or_default()
+    /// Creates an empty flow table with custom limits.
+    pub fn with_config(config: IpsTcpFlowTableConfig) -> Self {
+        Self { flows: HashMap::new(), lru: VecDeque::new(), tick: 0, config }
     }
 
-    pub fn get_mut(&mut self, key: &TcpFlowKey) -> Option<&mut TcpFlowState> {
-        self.flows.get_mut(key)
-    }
-
+    /// Returns the number of tracked flows.
     pub fn len(&self) -> usize {
         self.flows.len()
+    }
+
+    /// Returns true when no flows are tracked.
+    pub fn is_empty(&self) -> bool {
+        self.flows.is_empty()
+    }
+
+    /// Removes a flow explicitly.
+    pub fn remove(&mut self, key: &TcpFlowKey) {
+        if self.flows.remove(key).is_some() {
+            self.lru.retain(|k| k != key);
+        }
+    }
+
+    /// Removes the flow when [`TcpFlowState::should_evict`] is true.
+    pub fn remove_if_closed(&mut self, key: &TcpFlowKey, state: &TcpFlowState) {
+        if state.should_evict() {
+            self.remove(key);
+        }
+    }
+
+    /// Looks up a flow without inserting or updating LRU.
+    pub fn get_mut(&mut self, key: &TcpFlowKey) -> Option<&mut TcpFlowState> {
+        self.flows.get_mut(key).map(|entry| &mut entry.state)
+    }
+
+    /// Returns or inserts flow state, pruning idle entries and enforcing LRU cap.
+    pub fn get_or_insert(&mut self, key: TcpFlowKey) -> &mut TcpFlowState {
+        self.tick = self.tick.wrapping_add(1);
+        self.prune_idle();
+
+        if self.flows.contains_key(&key) {
+            self.touch_lru(&key);
+            let tick = self.tick;
+            let entry = self.flows.get_mut(&key).expect("present");
+            entry.last_tick = tick;
+            return &mut entry.state;
+        }
+
+        while self.flows.len() >= self.config.max_flows {
+            self.evict_lru();
+        }
+
+        self.lru.push_back(key.clone());
+        self.flows.insert(
+            key.clone(),
+            TcpFlowEntry { state: TcpFlowState::default(), last_tick: self.tick },
+        );
+        &mut self.flows.get_mut(&key).expect("just inserted").state
+    }
+
+    fn touch_lru(&mut self, key: &TcpFlowKey) {
+        if let Some(pos) = self.lru.iter().position(|k| k == key) {
+            self.lru.remove(pos);
+        }
+        self.lru.push_back(key.clone());
+    }
+
+    fn prune_idle(&mut self) {
+        let tick = self.tick;
+        let idle_ticks = self.config.idle_ticks;
+        let stale: Vec<TcpFlowKey> = self
+            .flows
+            .iter()
+            .filter(|(_, entry)| tick.wrapping_sub(entry.last_tick) > idle_ticks)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in stale {
+            self.remove(&key);
+        }
+    }
+
+    fn evict_lru(&mut self) {
+        while let Some(key) = self.lru.pop_front() {
+            if self.flows.remove(&key).is_some() {
+                return;
+            }
+        }
+    }
+}
+
+impl core::fmt::Debug for IpsTcpFlowTable {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("IpsTcpFlowTable")
+            .field("len", &self.flows.len())
+            .field("tick", &self.tick)
+            .field("config", &self.config)
+            .finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
     use net_types::ip::Ipv4Addr;
 
     use super::*;
@@ -268,6 +451,7 @@ mod tests {
         flow.apply_keep_edit(TcpFlowDirection::ClientToServer, 1000, 80, 40);
         assert_eq!(flow.c2s.delta, 40);
         assert_eq!(flow.c2s.committed_end, 1040);
+        assert_eq!(flow.c2s.dropped_ranges, vec![1040..1080]);
     }
 
     #[test]
@@ -288,6 +472,20 @@ mod tests {
             flow.retrim_keep_len(TcpFlowDirection::ClientToServer, 1000, 80),
             40
         );
+    }
+
+    #[test]
+    fn second_edit_still_suppresses_first_dropped_range_retransmit() {
+        let mut flow = TcpFlowState::default();
+        flow.apply_keep_edit(TcpFlowDirection::ClientToServer, 1000, 80, 40);
+        flow.apply_keep_edit(TcpFlowDirection::ClientToServer, 1080, 100, 60);
+
+        assert_eq!(flow.c2s.dropped_ranges.len(), 2);
+        assert_eq!(flow.c2s.dropped_ranges[0], 1040..1080);
+        assert_eq!(flow.c2s.dropped_ranges[1], 1140..1180);
+
+        let class = flow.classify_inbound(TcpFlowDirection::ClientToServer, 1040, 40);
+        assert_eq!(class, InboundSegmentClass::RetransmitDropped);
     }
 
     #[test]
@@ -323,5 +521,85 @@ mod tests {
         assert!(src_is_client);
         assert_eq!(key.client_port, 100);
         assert_eq!(key.server_port, 200);
+    }
+
+    #[test]
+    fn should_evict_on_rst_or_both_fins() {
+        let mut flow = TcpFlowState::default();
+        assert!(!flow.should_evict());
+        flow.note_control_flags(TcpFlowDirection::ClientToServer, true, false);
+        assert!(!flow.should_evict());
+        flow.note_control_flags(TcpFlowDirection::ServerToClient, true, false);
+        assert!(flow.should_evict());
+
+        let mut flow = TcpFlowState::default();
+        flow.note_control_flags(TcpFlowDirection::ClientToServer, false, true);
+        assert!(flow.should_evict());
+    }
+
+    #[test]
+    fn flow_table_enforces_lru_cap() {
+        let config = IpsTcpFlowTableConfig { max_flows: 2, idle_ticks: u64::MAX };
+        let mut table = IpsTcpFlowTable::with_config(config);
+
+        let key_a = TcpFlowKey {
+            client_ip: v4([1, 0, 0, 1]),
+            client_port: 1,
+            server_ip: v4([1, 0, 0, 2]),
+            server_port: 2,
+        };
+        let key_b = TcpFlowKey {
+            client_ip: v4([1, 0, 0, 1]),
+            client_port: 3,
+            server_ip: v4([1, 0, 0, 2]),
+            server_port: 4,
+        };
+        let key_c = TcpFlowKey {
+            client_ip: v4([1, 0, 0, 1]),
+            client_port: 5,
+            server_ip: v4([1, 0, 0, 2]),
+            server_port: 6,
+        };
+
+        table.get_or_insert(key_a.clone());
+        table.get_or_insert(key_b.clone());
+        table.get_or_insert(key_c.clone());
+
+        assert_eq!(table.len(), 2);
+        assert!(table.get_mut(&key_a).is_none(), "least recently used flow evicted");
+        assert!(table.get_mut(&key_b).is_some());
+        assert!(table.get_mut(&key_c).is_some());
+    }
+
+    #[test]
+    fn flow_table_prunes_idle_entries() {
+        let config = IpsTcpFlowTableConfig { max_flows: 16, idle_ticks: 2 };
+        let mut table = IpsTcpFlowTable::with_config(config);
+        let stale_key = TcpFlowKey {
+            client_ip: v4([10, 0, 0, 1]),
+            client_port: 80,
+            server_ip: v4([10, 0, 0, 2]),
+            server_port: 443,
+        };
+        table.get_or_insert(stale_key.clone());
+        table.get_or_insert(TcpFlowKey {
+            client_ip: v4([10, 0, 0, 3]),
+            client_port: 1,
+            server_ip: v4([10, 0, 0, 4]),
+            server_port: 2,
+        });
+        table.get_or_insert(TcpFlowKey {
+            client_ip: v4([10, 0, 0, 5]),
+            client_port: 3,
+            server_ip: v4([10, 0, 0, 6]),
+            server_port: 4,
+        });
+        table.get_or_insert(TcpFlowKey {
+            client_ip: v4([10, 0, 0, 7]),
+            client_port: 5,
+            server_ip: v4([10, 0, 0, 8]),
+            server_port: 6,
+        });
+        assert!(table.get_mut(&stale_key).is_none(), "idle flow must be pruned");
     }
 }

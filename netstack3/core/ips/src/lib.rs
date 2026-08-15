@@ -42,7 +42,8 @@ pub use overwrite::{UdpOverwriteChecksum, UdpOverwriteError, UdpOverwriter};
 pub use receive::process_ethernet_frame;
 pub use state::IpsState;
 pub use tcp_flow::{
-    InboundSegmentClass, IpsTcpFlowTable, TcpFlowDirection, TcpFlowKey, TcpFlowState,
+    InboundSegmentClass, IpsTcpFlowTable, IpsTcpFlowTableConfig, TcpEditRecord, TcpFlowDirection,
+    TcpFlowKey, TcpFlowState,
 };
 pub use tcp_overwrite::{
     TcpForwardAction, TcpOverwriteChecksum, TcpOverwriteError, TcpOverwriter, TcpPayloadEdit,
