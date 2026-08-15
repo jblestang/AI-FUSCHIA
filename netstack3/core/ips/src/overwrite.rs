@@ -7,8 +7,6 @@
 //! UDP and IPv4 header checksum fields are zeroed for NIC checksum offload on
 //! egress; the stack does not compute them in software.
 
-use alloc::vec::Vec;
-
 use packet_formats::ipv4::HDR_PREFIX_LEN;
 use packet_formats::udp::HEADER_BYTES;
 
