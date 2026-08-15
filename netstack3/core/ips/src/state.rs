@@ -30,25 +30,6 @@ impl IpsState {
     pub fn new() -> Self {
         Self::default()
     }
-
-    /// Creates IPS state with the given fragment demux capacity.
-    pub fn with_demux_config(config: IpsFragmentDemuxConfig) -> Self {
-        Self {
-            ipv4: IpsFragmentCache::with_config(config.clone()),
-            ipv6: IpsFragmentCache::with_config(config),
-            enabled: false,
-        }
-    }
-
-    /// Returns the IPv4 fragment demux configuration.
-    pub fn fragment_demux_config(&self) -> IpsFragmentDemuxConfig {
-        self.ipv4.config()
-    }
-
-    /// Number of incomplete fragment assemblies currently in the demux cache.
-    pub fn pending_fragment_assemblies(&self) -> usize {
-        self.ipv4.pending_assembly_count() + self.ipv6.pending_assembly_count()
-    }
 }
 
 impl Default for IpsState {
@@ -85,21 +66,6 @@ pub(crate) struct DatagramAssembly<I: Ip> {
     pub events: Vec<FragmentEvent>,
     pub missing_blocks: BTreeSet<BlockRange>,
     pub aborted: bool,
-    /// Monotonic sequence assigned when the assembly enters the demux cache.
-    pub demux_sequence: u64,
-}
-
-/// Capacity and eviction policy for the fragment demux cache.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IpsFragmentDemuxConfig {
-    /// Maximum concurrent incomplete fragment assemblies tracked at once.
-    pub max_concurrent_assemblies: usize,
-}
-
-impl Default for IpsFragmentDemuxConfig {
-    fn default() -> Self {
-        Self { max_concurrent_assemblies: 256 }
-    }
 }
 
 /// Inclusive fragment block range in 8-octet units (matches stack reassembly).
@@ -146,43 +112,16 @@ pub(crate) enum AssemblyProgress<I: Ip> {
 #[derive(Debug)]
 pub struct IpsFragmentCache<I: Ip> {
     assemblies: RefCell<HashMap<AssemblyKey<I>, DatagramAssembly<I>>>,
-    config: IpsFragmentDemuxConfig,
-    next_demux_sequence: RefCell<u64>,
 }
 
 impl<I: Ip> IpsFragmentCache<I> {
-    /// Creates an empty cache with the default demux capacity.
+    /// Creates an empty cache.
     pub fn new() -> Self {
-        Self::with_config(IpsFragmentDemuxConfig::default())
-    }
-
-    /// Creates an empty cache with explicit demux capacity.
-    pub fn with_config(config: IpsFragmentDemuxConfig) -> Self {
-        Self {
-            assemblies: RefCell::new(HashMap::new()),
-            config,
-            next_demux_sequence: RefCell::new(0),
-        }
-    }
-
-    /// Demux capacity configuration for this cache.
-    pub fn config(&self) -> IpsFragmentDemuxConfig {
-        self.config.clone()
-    }
-
-    /// Number of incomplete assemblies currently tracked.
-    pub fn pending_assembly_count(&self) -> usize {
-        self.assemblies.borrow().len()
+        Self { assemblies: RefCell::new(HashMap::new()) }
     }
 
     pub(crate) fn assemblies(&self) -> &RefCell<HashMap<AssemblyKey<I>, DatagramAssembly<I>>> {
         &self.assemblies
-    }
-
-    pub(crate) fn allocate_demux_sequence(&self) -> u64 {
-        let mut next = self.next_demux_sequence.borrow_mut();
-        *next += 1;
-        *next
     }
 }
 

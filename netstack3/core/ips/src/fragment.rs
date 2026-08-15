@@ -89,10 +89,6 @@ pub fn add_fragment<I: Ip>(
 ) -> AssemblyProgress<I> {
     let mut assemblies = cache.assemblies().borrow_mut();
 
-    if !assemblies.contains_key(&key) && assemblies.len() >= cache.config().max_concurrent_assemblies {
-        evict_oldest_assembly(&mut assemblies);
-    }
-
     let offset = stored.fragment_offset;
     let m_flag = stored.more_fragments;
     let body_len = stored.ip_body_range.len();
@@ -125,7 +121,6 @@ pub fn add_fragment<I: Ip>(
             events: Vec::new(),
             missing_blocks: missing,
             aborted: false,
-            demux_sequence: cache.allocate_demux_sequence(),
         }
     });
     let assembly = assemblies.get_mut(&key).unwrap();
@@ -210,20 +205,8 @@ fn abort_assembly<I: Ip>(
             events: alloc::vec![event],
             missing_blocks: BTreeSet::new(),
             aborted: true,
-            demux_sequence: 0,
         },
     }
-}
-
-fn evict_oldest_assembly<I: Ip>(assemblies: &mut HashMap<AssemblyKey<I>, DatagramAssembly<I>>) {
-    let Some(oldest_key) = assemblies
-        .iter()
-        .min_by_key(|(_, assembly)| assembly.demux_sequence)
-        .map(|(key, _)| *key)
-    else {
-        return;
-    };
-    assemblies.remove(&oldest_key);
 }
 
 /// Extracts stored frame from a full Ethernet buffer and IP packet range.

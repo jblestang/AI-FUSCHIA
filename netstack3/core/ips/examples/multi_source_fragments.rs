@@ -2,13 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Example: demux concurrent fragmented UDP datagrams from multiple sources.
+//! Example: reassemble interleaved fragmented UDP datagrams from multiple sources.
 //!
-//! Interleaved IP fragments from distinct `(src, dst, identification)` keys
-//! are tracked in separate assembly slots until each datagram completes.
+//! The fragment cache keys each assembly by `(src_ip, dst_ip, identification, UDP)`.
+//! Interleaved first fragments from three sources are tracked in parallel until
+//! each datagram completes.
 //!
 //! ```text
-//! cargo run -p netstack3-ips --features testutils --example demux_multi_source_fragments
+//! cargo run -p netstack3-ips --features testutils --example multi_source_fragments
 //! ```
 
 use core::num::NonZeroU16;
@@ -18,13 +19,12 @@ use net_types::ip::Ipv4Addr;
 use netstack3_base::testutil::FakeDeviceId;
 use netstack3_base::NetworkSerializationContext;
 use netstack3_ips::{
-    IpsFragmentDemuxConfig, IpsReceiveBindingsContext, IpsReceiveError, IpsState,
-    ReassemblyOutcome, process_ethernet_frame,
+    IpsReceiveBindingsContext, IpsReceiveError, IpsState, ReassemblyOutcome,
+    process_ethernet_frame,
 };
 use packet::{Buf, NestableSerializer as _, Serializer};
 use packet_formats::ethernet::{EtherType, EthernetFrameBuilder};
 use packet_formats::ip::{FragmentOffset, IpProto, Ipv4Proto};
-use packet_formats::udp::UdpPacketBuilder;
 
 const DST: Ipv4Addr = Ipv4Addr::new([192, 0, 2, 1]);
 const LOCAL_PORT: NonZeroU16 = NonZeroU16::new(100).unwrap();
@@ -55,9 +55,7 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for Capture {
 }
 
 fn main() {
-    let state = IpsState::with_demux_config(IpsFragmentDemuxConfig {
-        max_concurrent_assemblies: 64,
-    });
+    let state = IpsState::new();
     let mut handler = Capture { delivered: 0 };
     let udp_total = 8 + PAYLOAD_LEN;
 
@@ -81,9 +79,6 @@ fn main() {
         process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frag0).expect("frag 0");
     }
 
-    println!("Pending assemblies after 3 first fragments: {}", state.pending_fragment_assemblies());
-    assert_eq!(state.pending_fragment_assemblies(), 3);
-
     let second_len = udp_total - FRAGMENT_BODY_LEN;
     for &(src_host, frag_id) in &streams {
         let src = Ipv4Addr::new([192, 0, 2, src_host]);
@@ -99,7 +94,6 @@ fn main() {
 
     println!("Delivered {} reassembled datagrams", handler.delivered);
     assert_eq!(handler.delivered, 3);
-    assert_eq!(state.pending_fragment_assemblies(), 0);
 }
 
 fn build_fragment(

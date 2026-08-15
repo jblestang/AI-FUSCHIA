@@ -50,7 +50,7 @@ name = "udp_overwrite_payload"
 required-features = ["testutils"]
 
 [[example]]
-name = "demux_multi_source_fragments"
+name = "multi_source_fragments"
 required-features = ["testutils"]
 
 [[bench]]
