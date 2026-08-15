@@ -23,6 +23,7 @@ netstack3_base = { package = "netstack3-base", path = "../base" }
 netstack3_hashmap = { package = "netstack3-hashmap", path = "../hashmap" }
 packet = { path = "../../../libs/packet" }
 packet_formats = { package = "packet_formats", path = "../../../libs/packet-formats" }
+internet_checksum = { path = "../../../libs/internet-checksum" }
 zerocopy = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
@@ -42,6 +43,10 @@ required-features = ["testutils"]
 
 [[example]]
 name = "iterate_payload"
+required-features = ["testutils"]
+
+[[example]]
+name = "udp_overwrite_payload"
 required-features = ["testutils"]
 
 [[bench]]

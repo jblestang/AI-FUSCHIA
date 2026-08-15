@@ -692,6 +692,7 @@ version = "0.1.0"
 dependencies = [
  "assert_matches",
  "criterion",
+ "internet_checksum",
  "log",
  "net-types",
  "netstack3-base",

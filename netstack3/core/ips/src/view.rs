@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use net_types::ip::{IpAddr, Ipv4Addr, Ipv6Addr};
-use packet::{Buf, FragmentedByteSlice};
+use packet::{Buf, BufferMut, FragmentedByteSlice};
 
 /// Metadata describing IP fragment reception and reassembly per RFC 5722.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,5 +222,64 @@ impl ReceivedUdpDatagramView {
             IpAddr::V6(v6) => Some(v6),
             IpAddr::V4(_) => None,
         }
+    }
+
+    /// Applies metadata after consolidating to a single unfragmented IPv4 frame.
+    pub(crate) fn apply_unfragmented_overwrite(
+        &mut self,
+        eth_frames: Vec<Buf<Vec<u8>>>,
+        ip_fragment: IpFragmentInfo,
+        udp_header: UdpHeaderView,
+        payload_range: Range<usize>,
+    ) {
+        self.eth_frames = eth_frames;
+        self.ip_fragments = alloc::vec![ip_fragment.clone()];
+        self.fragment_metadata.fragments = alloc::vec![ip_fragment];
+        self.fragment_metadata.reassembly_outcome = ReassemblyOutcome::NotApplicable;
+        self.fragment_metadata.events.clear();
+        self.udp_header = Some(udp_header);
+        self.payload_parts = alloc::vec![PayloadPart {
+            eth_frame_index: 0,
+            range: payload_range,
+        }];
+    }
+
+    pub(crate) fn write_payload_part(&mut self, part_index: usize, data: &[u8]) -> bool {
+        let Some(part) = self.payload_parts.get(part_index) else {
+            return false;
+        };
+        if part.range.len() != data.len() {
+            return false;
+        }
+        let frame = &mut self.eth_frames[part.eth_frame_index];
+        frame.as_mut()[part.range.clone()].copy_from_slice(data);
+        true
+    }
+
+    pub(crate) fn update_udp_header_view(&mut self, length: u16) {
+        if let Some(hdr) = self.udp_header.as_mut() {
+            hdr.length = length;
+        }
+    }
+
+    pub(crate) fn eth_frame_buf_mut(&mut self, index: usize) -> Option<&mut [u8]> {
+        Some(self.eth_frames.get_mut(index)?.as_mut())
+    }
+
+    pub(crate) fn eth_frame_buf(&self, index: usize) -> Option<&[u8]> {
+        Some(self.eth_frames.get(index)?.as_ref())
+    }
+
+    pub(crate) fn ensure_eth_frame_len(&mut self, index: usize, min_len: usize) -> bool {
+        let Some(frame) = self.eth_frames.get(index) else {
+            return false;
+        };
+        if frame.as_ref().len() >= min_len {
+            return true;
+        }
+        let mut bytes = frame.as_ref().to_vec();
+        bytes.resize(min_len, 0);
+        self.eth_frames[index] = Buf::new(bytes, ..);
+        true
     }
 }

@@ -21,6 +21,7 @@ extern crate alloc;
 
 mod context;
 mod fragment;
+mod overwrite;
 mod receive;
 mod state;
 mod view;
@@ -39,6 +40,7 @@ pub use context::{
     IpsIngressHandler, IpsIngressResult, IpsReceiveBindingsContext, IpsReceiveError,
     TryIntoIpsFrame,
 };
+pub use overwrite::{UdpOverwriteError, UdpOverwriter};
 pub use receive::process_ethernet_frame;
 pub use state::IpsState;
 pub use view::{
