@@ -36,6 +36,10 @@ required-features = ["testutils"]
 name = "detect_ip_overlap"
 required-features = ["testutils"]
 
+[[example]]
+name = "detect_forced_segmentation"
+required-features = ["testutils"]
+
 [[bench]]
 name = "ips_receive_throughput"
 harness = false
