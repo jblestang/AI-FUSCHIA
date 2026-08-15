@@ -208,7 +208,9 @@ pub mod testutil {
         InstantAndData, WithFakeTimerContext,
     };
     pub use addr::{TEST_ADDRS_V4, TEST_ADDRS_V6, TestAddrs, TestDualStackIpExt, TestIpExt};
-    pub use benchmarks::{Bencher, RealBencher, TestBencher};
+    pub use benchmarks::{Bencher, TestBencher};
+    #[cfg(benchmark)]
+    pub use benchmarks::RealBencher;
     pub use fake_bindings::FakeBindingsCtx;
     pub use fake_core::FakeCoreCtx;
     pub use fake_network::{

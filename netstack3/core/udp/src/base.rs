@@ -3110,7 +3110,7 @@ impl<
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "benchmark"))]
 pub(crate) mod testutils {
     use alloc::borrow::ToOwned;
     use alloc::vec;
