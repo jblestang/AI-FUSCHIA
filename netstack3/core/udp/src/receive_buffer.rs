@@ -6,66 +6,53 @@
 
 use alloc::sync::Arc;
 use core::fmt;
-use core::ops::Range;
 
-use netstack3_ip::PacketSegment;
-use packet::ParseMetadata;
-use packet::{BufferMut, FragmentedBytes, ParseBuffer as _};
+use netstack3_ip::{LayerRanges, SharedPacketView};
+use packet::FragmentedBytes;
 
-/// Payload bytes delivered to a UDP socket as a range view into shared RX storage.
+/// Payload bytes delivered to a UDP socket as a layer view into shared RX storage.
 ///
-/// Fan-out (multicast / multiple sockets) clones the view (Arc refcount + range only).
+/// Shares the same [`SharedPacketView`] backing as [`crate::UdpRecvDatagram::view`];
+/// fan-out clones refcount only (no payload copy).
 #[derive(Clone, PartialEq, Eq)]
 pub struct UdpReceiveBuffer {
-    segment: PacketSegment,
+    view: SharedPacketView,
 }
 
 impl fmt::Debug for UdpReceiveBuffer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("UdpReceiveBuffer").field("len", &self.segment.len()).finish_non_exhaustive()
+        f.debug_struct("UdpReceiveBuffer").field("len", &self.as_slice().len()).finish_non_exhaustive()
     }
 }
 
 impl UdpReceiveBuffer {
-    /// Builds a payload view over shared storage.
-    pub fn view(segment: PacketSegment) -> Self {
-        Self { segment }
-    }
-
-    /// Views the UDP payload within `storage` using post-parse UDP metadata.
-    pub fn payload_view(
-        storage: Arc<[u8]>,
-        transport_range: Range<usize>,
-        parse_meta: ParseMetadata,
-    ) -> Self {
-        let start = transport_range.start.saturating_add(parse_meta.header_len());
-        let end = start.saturating_add(parse_meta.body_len());
-        if start <= end && end <= storage.len() {
-            Self::view(PacketSegment::view_in(storage, start..end))
-        } else {
-            Self::view(PacketSegment::capture(&[]))
-        }
+    /// Payload view sharing storage and layer ranges with a datagram frame view.
+    pub fn sharing(view: SharedPacketView) -> Self {
+        Self { view }
     }
 
     /// Placeholder for `bench-receive` (no storage touched).
     #[cfg(feature = "bench-receive")]
     pub fn bench_receive_placeholder() -> Self {
-        Self::view(netstack3_ip::PacketSegment::view_in(Arc::from([]), 0..0))
+        Self::sharing(SharedPacketView::contiguous(
+            Arc::from([]),
+            LayerRanges { ip: 0..0, transport: 0..0, payload: 0..0 },
+        ))
     }
 
     /// Returns the payload as a contiguous slice (zero-copy borrow of shared storage).
     pub fn as_slice(&self) -> &[u8] {
-        self.segment.as_slice()
+        self.view.payload_as_slice()
     }
 
     /// Returns a refcount-only clone suitable for fan-out delivery.
     pub fn share(&self) -> Self {
-        Self { segment: self.segment.clone() }
+        Self { view: self.view.clone() }
     }
 
-    /// Returns the underlying segment view.
-    pub fn segment(&self) -> &PacketSegment {
-        &self.segment
+    /// Shared frame view (payload is the `layers.payload` range).
+    pub fn shared_view(&self) -> &SharedPacketView {
+        &self.view
     }
 
     /// Invokes `f` with payload bytes as a [`FragmentedBytes`] view.
@@ -73,9 +60,7 @@ impl UdpReceiveBuffer {
     where
         F: for<'b> FnOnce(FragmentedBytes<'b, '_>) -> R,
     {
-        let slice = self.segment.as_slice();
-        let mut slices = [slice];
-        f(FragmentedBytes::new(&mut slices))
+        self.view.with_payload(f)
     }
 }
 
@@ -83,24 +68,16 @@ impl UdpReceiveBuffer {
 #[cfg(any(test, feature = "testutils"))]
 impl From<&[u8]> for UdpReceiveBuffer {
     fn from(slice: &[u8]) -> Self {
-        Self::view(PacketSegment::capture(slice))
+        let storage: Arc<[u8]> = Arc::from(slice);
+        let len = storage.len();
+        let layers = LayerRanges { ip: 0..len, transport: 0..len, payload: 0..len };
+        Self::sharing(SharedPacketView::contiguous(storage, layers))
     }
 }
 
 #[cfg(any(test, feature = "testutils"))]
 impl<const N: usize> From<[u8; N]> for UdpReceiveBuffer {
     fn from(arr: [u8; N]) -> Self {
-        Self::view(PacketSegment::capture(&arr))
+        Self::from(&arr[..])
     }
-}
-
-/// Computes the transport-layer byte range within pinned storage for a parsed buffer view.
-pub fn transport_range_in_storage<B: BufferMut>(
-    storage: &Arc<[u8]>,
-    buffer: &B,
-) -> Range<usize> {
-    let slice = buffer.as_ref();
-    let storage = storage.as_ref();
-    let start = slice.as_ptr() as usize - storage.as_ptr() as usize;
-    start..start + slice.len()
 }

@@ -260,7 +260,11 @@ pub use internal::local_delivery::{
     IpHeaderInfo, IpReceiveMeta, LocalDeliveryPacketInfo, ReceiveIpPacketMeta,
     TransparentLocalDelivery,
 };
-pub use internal::transport_body::{layer_ranges_in_frame, transport_range_in_storage, transport_packet_view};
+pub use internal::transport_body::{
+    layer_ranges_in_frame, shared_packet_view_at_transport_start,
+    shared_packet_view_for_transport, transport_packet_view, transport_range_in_storage,
+    transport_start_in_frame,
+};
 pub use internal::path_mtu::{PmtuCache, PmtuContext};
 pub use internal::pinned_frame::{IntoPinnedFrame, PinnedFrameBuffer, RxFrameStorage};
 pub use internal::fragment_chain::{

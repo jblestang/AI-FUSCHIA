@@ -247,6 +247,32 @@ impl SharedPacketView {
         self.with_subrange(self.layers.payload.clone(), f)
     }
 
+    /// Returns the payload layer as a contiguous slice when it lies in one segment.
+    pub fn payload_as_slice(&self) -> &[u8] {
+        self.slice_at(self.layers.payload.clone())
+    }
+
+    /// Returns a contiguous subslice of the logical packet when wholly within one segment.
+    pub fn slice_at(&self, logical: Range<usize>) -> &[u8] {
+        let mut cursor = 0;
+        for seg in self.segments.iter() {
+            let seg_len = seg.len();
+            let seg_start = cursor;
+            let seg_end = cursor + seg_len;
+            cursor = seg_end;
+            if logical.end <= seg_start || logical.start >= seg_end {
+                continue;
+            }
+            if logical.start >= seg_start && logical.end <= seg_end {
+                let local_start = logical.start - seg_start;
+                let local_end = logical.end - seg_start;
+                return &seg.as_slice()[local_start..local_end];
+            }
+            break;
+        }
+        &[]
+    }
+
     /// Invokes `f` with the full IP datagram bytes.
     pub fn with_ip_datagram<R, F>(&self, f: F) -> R
     where

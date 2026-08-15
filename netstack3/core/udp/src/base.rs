@@ -1169,52 +1169,12 @@ impl UdpRecvDatagram<Ipv4> {
     }
 }
 
-use netstack3_ip::{IpReceiveMeta, SharedPacketView, transport_packet_view};
+use netstack3_ip::{
+    IpReceiveMeta, SharedPacketView, shared_packet_view_at_transport_start,
+    shared_packet_view_for_transport, transport_start_in_frame,
+};
 
 use crate::internal::receive_buffer::UdpReceiveBuffer;
-
-fn udp_transport_slice<'a>(
-    packet: &'a UdpPacket<&[u8]>,
-    parse_meta: packet::ParseMetadata,
-) -> &'a [u8] {
-    let header_len = parse_meta.header_len();
-    let total_len = header_len + parse_meta.body_len();
-    let body = packet.body();
-    // SAFETY: The UDP header and body are parsed from a contiguous buffer and
-    // remain contiguous in the original RX frame.
-    unsafe { core::slice::from_raw_parts(body.as_ptr().sub(header_len), total_len) }
-}
-
-fn udp_payload_view(
-    frame_storage: &Option<alloc::sync::Arc<[u8]>>,
-    packet: &packet_formats::udp::UdpPacket<&[u8]>,
-) -> UdpReceiveBuffer {
-    let payload = packet.body();
-    if let Some(frame) = frame_storage {
-        if let Some(segment) = netstack3_ip::PacketSegment::view_of_subslice(frame.clone(), payload)
-        {
-            return UdpReceiveBuffer::view(segment);
-        }
-    }
-    // Storage mismatch (e.g. copy-on-write split): one capture at delivery; fan-out shares the view.
-    UdpReceiveBuffer::view(netstack3_ip::PacketSegment::capture(payload))
-}
-
-fn build_udp_recv_datagram<I: IpExt, H: IpHeaderInfo<I>>(
-    meta: UdpPacketMeta<I>,
-    header_info: &H,
-    frame_storage: &Option<alloc::sync::Arc<[u8]>>,
-    transport_slice: &[u8],
-    packet: &packet_formats::udp::UdpPacket<&[u8]>,
-    parse_meta: packet::ParseMetadata,
-) -> UdpRecvDatagram<I> {
-    UdpRecvDatagram {
-        meta,
-        ip_meta: IpReceiveMeta::from_header(header_info),
-        view: transport_packet_view(frame_storage, transport_slice, parse_meta),
-        payload: udp_payload_view(frame_storage, packet),
-    }
-}
 
 /// A datagram dequeued from a socket receive queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1225,18 +1185,53 @@ pub struct UdpRecvDatagram<I: Ip> {
     pub ip_meta: IpReceiveMeta,
     /// Full received frame with IP, transport, and payload layer ranges.
     pub view: SharedPacketView,
-    /// UDP payload bytes (shared, zero-copy on fan-out).
+    /// UDP payload bytes (shares [`Self::view`] storage; zero-copy on fan-out).
     pub payload: UdpReceiveBuffer,
 }
 
 impl<I: Ip> UdpRecvDatagram<I> {
+    /// Builds a datagram from a parsed UDP packet and optional pinned frame storage.
+    fn from_parsed_transport<H: IpHeaderInfo<I>>(
+        meta: UdpPacketMeta<I>,
+        header_info: &H,
+        frame_storage: Option<&alloc::sync::Arc<[u8]>>,
+        packet: &UdpPacket<&[u8]>,
+        parse_meta: packet::ParseMetadata,
+    ) -> Self {
+        let view = match frame_storage {
+            Some(frame) => match transport_start_in_frame(frame, packet.body(), parse_meta) {
+                Some(start) => shared_packet_view_at_transport_start(frame, start, parse_meta),
+                None => Self::shared_view_from_packet_wire(packet, parse_meta),
+            },
+            None => Self::shared_view_from_packet_wire(packet, parse_meta),
+        };
+        Self {
+            meta,
+            ip_meta: IpReceiveMeta::from_header(header_info),
+            payload: UdpReceiveBuffer::sharing(view.clone()),
+            view,
+        }
+    }
+
+    fn shared_view_from_packet_wire(
+        packet: &UdpPacket<&[u8]>,
+        parse_meta: packet::ParseMetadata,
+    ) -> SharedPacketView {
+        let header_len = parse_meta.header_len();
+        let body = packet.body();
+        let transport = unsafe {
+            core::slice::from_raw_parts(body.as_ptr().sub(header_len), header_len + parse_meta.body_len())
+        };
+        shared_packet_view_for_transport(None, transport, parse_meta)
+    }
+
     /// Returns a refcount-only clone suitable for fan-out delivery.
     pub fn share(&self) -> Self {
         Self {
             meta: self.meta.clone(),
             ip_meta: self.ip_meta.clone(),
             view: self.view.clone(),
-            payload: self.payload.share(),
+            payload: UdpReceiveBuffer::sharing(self.view.clone()),
         }
     }
 
@@ -1850,7 +1845,7 @@ fn receive_ip_packet_early_demux<
     header_info: &H,
     parsing_context: &mut NetworkParsingContext,
     early_demux_socket: I::DualStackBoundSocketId<CC::WeakDeviceId, Udp<BC>>,
-    frame_storage: Option<alloc::sync::Arc<[u8]>>,
+    frame_storage: &Option<alloc::sync::Arc<[u8]>>,
 ) -> Result<(), (B, I::IcmpError)> {
     let Ok(packet) = buffer.parse_with::<_, UdpPacket<_>>(UdpParseArgs::with_context(
         src_ip,
@@ -1867,7 +1862,6 @@ fn receive_ip_packet_early_demux<
         ParsablePacket::<_, UdpParseArgs<I::Addr, &mut NetworkParsingContext>>::parse_metadata(
             &packet,
         );
-    let transport_slice = udp_transport_slice(&packet, parse_meta);
 
     let meta = UdpPacketMeta {
         src_ip,
@@ -1877,8 +1871,13 @@ fn receive_ip_packet_early_demux<
         dscp_and_ecn: header_info.dscp_and_ecn(),
     };
 
-    let datagram =
-        build_udp_recv_datagram(meta, header_info, &frame_storage, transport_slice, &packet, parse_meta);
+    let datagram = UdpRecvDatagram::from_parsed_transport(
+        meta,
+        header_info,
+        frame_storage.as_ref(),
+        &packet,
+        parse_meta,
+    );
     let was_delivered = deliver_early_demux_socket::<I, _, _, _>(
         core_ctx,
         bindings_ctx,
@@ -1937,7 +1936,7 @@ fn receive_ip_packet<
             header_info,
             parsing_context,
             early_demux_socket.expect("checked is_some above"),
-            frame_storage.clone(),
+            &*frame_storage,
         );
     }
 
@@ -1993,7 +1992,6 @@ fn receive_ip_packet<
         ParsablePacket::<_, UdpParseArgs<I::Addr, &mut NetworkParsingContext>>::parse_metadata(
             &packet,
         );
-    let transport_slice = udp_transport_slice(&packet, parse_meta);
 
     /// The maximum number of socket IDs that are expected to receive a given
     /// packet. While it's possible for this number to be exceeded, it's
@@ -2040,8 +2038,13 @@ fn receive_ip_packet<
         dscp_and_ecn: header_info.dscp_and_ecn(),
     };
 
-    let datagram =
-        build_udp_recv_datagram(meta, header_info, &frame_storage, transport_slice, &packet, parse_meta);
+    let datagram = UdpRecvDatagram::from_parsed_transport(
+        meta,
+        header_info,
+        frame_storage.as_ref(),
+        &packet,
+        parse_meta,
+    );
     let was_delivered = recipients.into_iter().fold(false, |was_delivered, lookup_result| {
         let delivered = try_dual_stack_deliver::<I, BC, CC, H>(
             core_ctx,

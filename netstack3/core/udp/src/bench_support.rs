@@ -129,7 +129,8 @@ fn build_ipv4_udp_packet(payload_len: usize) -> PreparedPacket {
 fn receive_ipv4_udp_packet_borrowed(
     core_ctx: &mut UdpFakeDeviceCoreCtx,
     bindings_ctx: &mut FakeUdpBindingsCtx<FakeDeviceId>,
-    packet: &mut PreparedPacket,
+    storage: &mut Arc<[u8]>,
+    meta: &UdpPacketMeta<Ipv4>,
     early_demux_socket: Option<
         &DualStackUdpSocketId<
             Ipv4,
@@ -138,12 +139,10 @@ fn receive_ipv4_udp_packet_borrowed(
         >,
     >,
 ) {
-    let PreparedPacket { storage, meta } = packet;
     let UdpPacketMeta { src_ip, dst_ip, dst_port, dscp_and_ecn, .. } = meta;
 
-    let mut storage = storage.clone();
-    let frame_storage = Some(storage.clone());
-    let scratch = Arc::make_mut(&mut storage);
+    let frame_storage = Arc::clone(storage);
+    let scratch = Arc::make_mut(storage);
     let result = <UdpIpTransportContext as IpTransportContext<Ipv4, _, _>>::receive_ip_packet(
         core_ctx,
         bindings_ctx,
@@ -153,7 +152,7 @@ fn receive_ipv4_udp_packet_borrowed(
         Buf::new(&mut scratch[..], ..),
         &mut LocalDeliveryPacketInfo {
             header_info: FakeIpHeaderInfo { dscp_and_ecn: *dscp_and_ecn, ..Default::default() },
-            frame_storage,
+            frame_storage: Some(frame_storage),
             ..Default::default()
         },
         early_demux_socket.cloned(),
@@ -176,8 +175,8 @@ fn receive_ipv4_udp_packet_owned(
     let PreparedPacket { storage, meta } = packet;
     let UdpPacketMeta { src_ip, dst_ip, dst_port, dscp_and_ecn, .. } = meta;
 
-    let mut storage = storage.clone();
-    let frame_storage = Some(storage.clone());
+    let mut storage = storage;
+    let frame_storage = Arc::clone(&storage);
     let scratch = Arc::make_mut(&mut storage);
     let result = <UdpIpTransportContext as IpTransportContext<Ipv4, _, _>>::receive_ip_packet(
         core_ctx,
@@ -188,7 +187,7 @@ fn receive_ipv4_udp_packet_owned(
         Buf::new(&mut scratch[..], ..),
         &mut LocalDeliveryPacketInfo {
             header_info: FakeIpHeaderInfo { dscp_and_ecn, ..Default::default() },
-            frame_storage,
+            frame_storage: Some(frame_storage),
             ..Default::default()
         },
         early_demux_socket,
@@ -211,7 +210,8 @@ pub fn add_benches(group: &mut criterion::BenchmarkGroup<'_, criterion::measurem
         group.throughput(criterion::Throughput::Bytes(batch_bytes));
         group.bench_function(format!("{base}/bytes"), |bencher| {
             let mut packet = build_ipv4_udp_packet(payload_len);
-            let BenchmarkCtx { mut ctx, early_demux_socket } = setup_connected_benchmark_ctx(&packet);
+            let BenchmarkCtx { mut ctx, early_demux_socket } =
+                setup_connected_benchmark_ctx(&packet);
 
             bencher.iter(|| {
                 let ctx_pair = ctx.as_mut();
@@ -219,7 +219,8 @@ pub fn add_benches(group: &mut criterion::BenchmarkGroup<'_, criterion::measurem
                     receive_ipv4_udp_packet_borrowed(
                         ctx_pair.core_ctx,
                         ctx_pair.bindings_ctx,
-                        &mut packet,
+                        &mut packet.storage,
+                        &packet.meta,
                         Some(&early_demux_socket),
                     );
                 }
@@ -229,14 +230,16 @@ pub fn add_benches(group: &mut criterion::BenchmarkGroup<'_, criterion::measurem
         group.throughput(criterion::Throughput::Elements(1));
         group.bench_function(format!("{base}/per-packet"), |bencher| {
             let mut packet = build_ipv4_udp_packet(payload_len);
-            let BenchmarkCtx { mut ctx, early_demux_socket } = setup_connected_benchmark_ctx(&packet);
+            let BenchmarkCtx { mut ctx, early_demux_socket } =
+                setup_connected_benchmark_ctx(&packet);
 
             bencher.iter(|| {
                 let ctx_pair = ctx.as_mut();
                 receive_ipv4_udp_packet_borrowed(
                     ctx_pair.core_ctx,
                     ctx_pair.bindings_ctx,
-                    &mut packet,
+                    &mut packet.storage,
+                    &packet.meta,
                     Some(&early_demux_socket),
                 );
             });
@@ -284,7 +287,8 @@ pub fn profile_hot_loop(payload_len: usize, batches: Option<u64>) {
             receive_ipv4_udp_packet_borrowed(
                 ctx_pair.core_ctx,
                 ctx_pair.bindings_ctx,
-                &mut packet,
+                &mut packet.storage,
+                &packet.meta,
                 Some(&early_demux_socket),
             );
         }
