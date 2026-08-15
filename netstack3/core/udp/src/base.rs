@@ -1207,15 +1207,22 @@ impl<I: Ip> UdpRecvDatagram<I> {
                     parse_meta,
                     ip_fragment_chain,
                 ),
-                None => Self::shared_view_from_packet_wire(packet, parse_meta),
+                None => Self::shared_view_from_packet_wire(
+                    Some(&frame),
+                    ip_fragment_chain,
+                    packet,
+                    parse_meta,
+                ),
             },
-            None => Self::shared_view_from_packet_wire(packet, parse_meta),
+            None => Self::shared_view_from_packet_wire(None, ip_fragment_chain, packet, parse_meta),
         };
         let payload = UdpReceiveBuffer::sharing(view.clone());
         Self { meta, ip_meta: IpReceiveMeta::from_header(header_info), view, payload }
     }
 
     fn shared_view_from_packet_wire(
+        frame_storage: Option<&alloc::sync::Arc<[u8]>>,
+        ip_fragment_chain: Option<alloc::sync::Arc<[netstack3_ip::PacketSegment]>>,
         packet: &UdpPacket<&[u8]>,
         parse_meta: packet::ParseMetadata,
     ) -> SharedPacketView {
@@ -1224,7 +1231,22 @@ impl<I: Ip> UdpRecvDatagram<I> {
         let transport = unsafe {
             core::slice::from_raw_parts(body.as_ptr().sub(header_len), header_len + parse_meta.body_len())
         };
-        shared_packet_view_for_transport(None, transport, parse_meta, None)
+        shared_packet_view_for_transport(frame_storage, transport, parse_meta, ip_fragment_chain)
+    }
+
+    /// Wire IP fragments when the datagram was reassembled before UDP parse.
+    pub fn ip_fragment_chain(&self) -> Option<&[netstack3_ip::PacketSegment]> {
+        self.view.ip_fragment_chain()
+    }
+
+    /// Raw IPv4 TOS byte per wire IP fragment (when [`Self::ip_fragment_chain`] is present).
+    pub fn ipv4_fragment_tos_raw(&self) -> impl Iterator<Item = u8> + '_ {
+        self.view.ipv4_fragment_tos_raw()
+    }
+
+    /// True when the datagram arrived via multi-fragment IP reassembly.
+    pub fn is_reassembled_from_ip_fragments(&self) -> bool {
+        self.view.is_reassembled_from_fragments()
     }
 
     /// Returns a refcount-only clone suitable for fan-out delivery.
