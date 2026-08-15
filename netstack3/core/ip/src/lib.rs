@@ -37,6 +37,7 @@ mod internal {
     pub(super) mod routing;
     pub(super) mod sas;
     pub(super) mod socket;
+    pub(super) mod transport_body;
     pub(super) mod types;
     pub(super) mod uninstantiable;
 }

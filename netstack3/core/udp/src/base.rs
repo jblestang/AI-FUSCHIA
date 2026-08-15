@@ -1793,6 +1793,11 @@ fn receive_ip_packet_early_demux<
 
     CounterContext::<UdpCountersWithoutSocket<I>>::counters(core_ctx).rx.increment();
 
+    let parse_meta =
+        ParsablePacket::<_, UdpParseArgs<I::Addr, &mut NetworkParsingContext>>::parse_metadata(
+            &packet,
+        );
+
     let meta = UdpPacketMeta {
         src_ip,
         src_port: packet.src_port(),
@@ -1816,10 +1821,6 @@ fn receive_ip_packet_early_demux<
     if was_delivered {
         Ok(())
     } else {
-        let parse_meta =
-            ParsablePacket::<_, UdpParseArgs<I::Addr, &mut NetworkParsingContext>>::parse_metadata(
-                &packet,
-            );
         buffer.undo_parse(parse_meta);
         CounterContext::<UdpCountersWithoutSocket<I>>::counters(core_ctx)
             .rx_unknown_dest_port
@@ -1965,6 +1966,7 @@ fn receive_ip_packet<
         dst_port,
         dscp_and_ecn: header_info.dscp_and_ecn(),
     };
+
     let body = UdpReceiveBuffer::from_slice(packet.body());
     let was_delivered = recipients.into_iter().fold(false, |was_delivered, lookup_result| {
         let delivered = try_dual_stack_deliver::<I, BC, CC, H>(

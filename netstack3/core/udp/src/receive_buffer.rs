@@ -36,7 +36,7 @@ impl UdpReceiveBuffer {
     }
 
     /// Takes the UDP payload out of a [`Buf`] after parsing (zero-copy move).
-    pub fn from_buf(mut buffer: Buf<alloc::vec::Vec<u8>>) -> Self {
+    pub fn from_buf(buffer: Buf<alloc::vec::Vec<u8>>) -> Self {
         Self::from_vec(buffer.into_inner())
     }
 
@@ -60,6 +60,26 @@ impl UdpReceiveBuffer {
     /// Consumes the buffer and returns the underlying shared storage.
     pub fn into_arc(self) -> Arc<[u8]> {
         self.bytes
+    }
+
+    /// Builds a payload from a post-IP transport buffer (one move, no byte copy).
+    pub fn from_transport_buffer(buffer: Buf<alloc::vec::Vec<u8>>) -> Self {
+        Self::from_buf(buffer)
+    }
+
+    /// Takes the UDP payload out of an owned transport buffer after parsing.
+    ///
+    /// Restores the full datagram with [`GrowBuffer::undo_parse`], strips the UDP
+    /// header, and moves the payload bytes into shared storage without copying.
+    pub fn from_parsed_transport_buffer(
+        buffer: &mut Buf<alloc::vec::Vec<u8>>,
+        parse_meta: packet::ParseMetadata,
+    ) -> Self {
+        use packet::{GrowBuffer as _, ShrinkBuffer as _};
+        let header_len = parse_meta.header_len();
+        buffer.undo_parse(parse_meta);
+        buffer.shrink_front(header_len);
+        Self::from_transport_buffer(core::mem::replace(buffer, Buf::new(alloc::vec![], ..0)))
     }
 }
 

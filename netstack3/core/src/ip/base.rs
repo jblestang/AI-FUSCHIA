@@ -509,7 +509,7 @@ impl<BC: BindingsContext, L: LockBefore<crate::lock_ordering::IcmpAllSocketsSet<
         body: B,
         info: &mut LocalDeliveryPacketInfo<Ipv4, H>,
         early_demux_socket: Option<Self::EarlyDemuxSocket>,
-    ) -> Result<(), Icmpv4Error> {
+    ) -> Result<(), (B, Icmpv4Error)> {
         match proto {
             Ipv4Proto::Icmp => {
                 <IcmpIpTransportContext as IpTransportContext<Ipv4, _, _>>::receive_ip_packet(
@@ -522,7 +522,6 @@ impl<BC: BindingsContext, L: LockBefore<crate::lock_ordering::IcmpAllSocketsSet<
                     info,
                     None,
                 )
-                .map_err(|(_body, err)| err)
             }
             Ipv4Proto::Igmp => {
                 device::receive_igmp_packet(self, bindings_ctx, device, src_ip, dst_ip, body, info);
@@ -539,7 +538,6 @@ impl<BC: BindingsContext, L: LockBefore<crate::lock_ordering::IcmpAllSocketsSet<
                     info,
                     early_demux_socket.map(EarlyDemuxSocket::into_udp),
                 )
-                .map_err(|(_body, err)| err)
             }
             Ipv4Proto::Proto(IpProto::Tcp) => {
                 <TcpIpTransportContext as IpTransportContext<Ipv4, _, _>>::receive_ip_packet(
@@ -552,10 +550,9 @@ impl<BC: BindingsContext, L: LockBefore<crate::lock_ordering::IcmpAllSocketsSet<
                     info,
                     early_demux_socket.map(EarlyDemuxSocket::into_tcp),
                 )
-                .map_err(|(_body, err)| err)
             }
             Ipv4Proto::Proto(IpProto::Reserved) | Ipv4Proto::Other(_) => {
-                Err(Icmpv4Error::ProtocolUnreachable)
+                Err((body, Icmpv4Error::ProtocolUnreachable))
             }
         }
     }
@@ -615,7 +612,7 @@ impl<BC: BindingsContext, L: LockBefore<crate::lock_ordering::IcmpAllSocketsSet<
         body: B,
         info: &mut LocalDeliveryPacketInfo<Ipv6, H>,
         early_demux_socket: Option<Self::EarlyDemuxSocket>,
-    ) -> Result<(), Icmpv6Error> {
+    ) -> Result<(), (B, Icmpv6Error)> {
         match proto {
             Ipv6Proto::Icmpv6 => {
                 <IcmpIpTransportContext as IpTransportContext<Ipv6, _, _>>::receive_ip_packet(
@@ -628,7 +625,6 @@ impl<BC: BindingsContext, L: LockBefore<crate::lock_ordering::IcmpAllSocketsSet<
                     info,
                     None,
                 )
-                .map_err(|(_body, err)| err)
             }
             // A value of `Ipv6Proto::NoNextHeader` tells us that there is no
             // header whatsoever following the last lower-level header so we stop
@@ -645,7 +641,6 @@ impl<BC: BindingsContext, L: LockBefore<crate::lock_ordering::IcmpAllSocketsSet<
                     info,
                     early_demux_socket.map(EarlyDemuxSocket::into_tcp),
                 )
-                .map_err(|(_body, err)| err)
             }
             Ipv6Proto::Proto(IpProto::Udp) => {
                 <UdpIpTransportContext as IpTransportContext<Ipv6, _, _>>::receive_ip_packet(
@@ -658,7 +653,6 @@ impl<BC: BindingsContext, L: LockBefore<crate::lock_ordering::IcmpAllSocketsSet<
                     info,
                     early_demux_socket.map(EarlyDemuxSocket::into_udp),
                 )
-                .map_err(|(_body, err)| err)
             }
             Ipv6Proto::Proto(IpProto::Reserved) | Ipv6Proto::Other(_) => {
                 // IPv6 packet parser rejects with unrecognized next header.

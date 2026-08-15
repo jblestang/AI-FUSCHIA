@@ -1764,8 +1764,9 @@ pub trait IpTransportDispatchContext<I: IpLayerIpExt, BC>: DeviceIdContext<AnyDe
     ) -> Option<Self::EarlyDemuxSocket>;
 
     /// Dispatches a received incoming IP packet to the appropriate protocol.
-    /// In case of a failure returns the kind of the ICMP error that should be
-    /// sent back to the source.
+    ///
+    /// On failure, returns the transport buffer (restored to pre-parse state where
+    /// applicable) and the ICMP error to send.
     fn dispatch_receive_ip_packet<B: BufferMut, H: IpHeaderInfo<I>>(
         &mut self,
         bindings_ctx: &mut BC,
@@ -1776,7 +1777,7 @@ pub trait IpTransportDispatchContext<I: IpLayerIpExt, BC>: DeviceIdContext<AnyDe
         body: B,
         info: &mut LocalDeliveryPacketInfo<I, H>,
         early_demux_socket: Option<Self::EarlyDemuxSocket>,
-    ) -> Result<(), I::IcmpError>;
+    ) -> Result<(), (B, I::IcmpError)>;
 }
 
 /// A marker trait for all the contexts required for IP ingress.
@@ -2550,6 +2551,16 @@ pub(crate) fn reject_type_to_icmpv6_error(reject_type: RejectType) -> Option<Icm
 // particular, they may accidentally pass a parse_metadata argument which
 // corresponds to a single extension header rather than all of the IPv6 headers.
 
+/// Returns a pointer to the owned IP buffer when present, for zero-copy transport detach.
+fn owned_ip_buffer_ptr<B: BufferMut>(
+    buffer: &mut packet::Either<B, Buf<Vec<u8>>>,
+) -> Option<*mut Buf<Vec<u8>>> {
+    match buffer {
+        packet::Either::B(b) => Some(b as *mut Buf<Vec<u8>>),
+        packet::Either::A(_) => None,
+    }
+}
+
 /// Dispatch a received IPv4 packet to the appropriate protocol.
 ///
 /// `device` is the device the packet was received on. `parse_metadata` is the
@@ -2578,6 +2589,7 @@ fn dispatch_receive_ipv4_packet<
     mut packet: Ipv4Packet<&'a mut [u8]>,
     mut packet_metadata: IpLayerPacketMetadata<Ipv4, CC::WeakAddressId, BC>,
     receive_meta: ReceiveIpPacketMeta<Ipv4>,
+    owned_ip_buffer: Option<*mut Buf<Vec<u8>>>,
 ) -> Result<(), IcmpErrorSender<'b, Ipv4, CC::DeviceId>> {
     core_ctx.increment_both(device, |c| &c.dispatch_receive_ip_packet);
 
@@ -2664,9 +2676,17 @@ fn dispatch_receive_ipv4_packet<
 
     let proto = packet.proto();
     let (prefix, options, body) = packet.parts_with_body_mut();
-    let buffer = Buf::new(body, ..);
     let header_info = Ipv4HeaderInfo { prefix, options: options.as_ref() };
     let mut receive_info = LocalDeliveryPacketInfo { meta: receive_meta, header_info, marks };
+
+    let transport: Buf<Vec<u8>> = if let Some(ip_buffer) = owned_ip_buffer {
+        // SAFETY: `owned_ip_buffer` points at the same backing store as `packet`.
+        // After detach we must not read transport bytes through `packet` until
+        // reattach; IP header fields used for ICMP remain valid in the prefix.
+        unsafe { crate::internal::transport_body::detach_transport_body(&mut *ip_buffer) }
+    } else {
+        Buf::new(body.to_vec(), ..)
+    };
 
     core_ctx
         .dispatch_receive_ip_packet(
@@ -2675,11 +2695,19 @@ fn dispatch_receive_ipv4_packet<
             src_ip,
             dst_ip,
             proto,
-            buffer,
+            transport,
             &mut receive_info,
             early_demux_socket,
         )
-        .or_else(|icmp_error| {
+        .or_else(|(transport, icmp_error)| {
+            if let Some(ip_buffer) = owned_ip_buffer {
+                unsafe {
+                    crate::internal::transport_body::reattach_transport_body(
+                        &mut *ip_buffer,
+                        transport,
+                    );
+                }
+            }
             match IcmpErrorSender::new(core_ctx, icmp_error, &packet, frame_dst, device, marks) {
                 Some(icmp_sender) => Err(icmp_sender),
                 None => Ok(()),
@@ -2704,6 +2732,7 @@ fn dispatch_receive_ipv6_packet<
     mut packet: Ipv6Packet<&'a mut [u8]>,
     mut packet_metadata: IpLayerPacketMetadata<Ipv6, CC::WeakAddressId, BC>,
     meta: ReceiveIpPacketMeta<Ipv6>,
+    owned_ip_buffer: Option<*mut Buf<Vec<u8>>>,
 ) -> Result<(), IcmpErrorSender<'b, Ipv6, CC::DeviceId>> {
     // TODO(https://fxbug.dev/42095067): Once we support multiple extension
     // headers in IPv6, we will need to verify that the callers of this
@@ -2797,9 +2826,15 @@ fn dispatch_receive_ipv6_packet<
 
     let proto = packet.proto();
     let (fixed, extension, body) = packet.parts_with_body_mut();
-    let buffer = Buf::new(body, ..);
     let header_info = Ipv6HeaderInfo { fixed, extension };
     let mut receive_info = LocalDeliveryPacketInfo { meta, header_info, marks };
+
+    let transport: Buf<Vec<u8>> = if let Some(ip_buffer) = owned_ip_buffer {
+        // SAFETY: see `dispatch_receive_ipv4_packet`.
+        unsafe { crate::internal::transport_body::detach_transport_body(&mut *ip_buffer) }
+    } else {
+        Buf::new(body.to_vec(), ..)
+    };
 
     core_ctx
         .dispatch_receive_ip_packet(
@@ -2808,11 +2843,19 @@ fn dispatch_receive_ipv6_packet<
             src_ip,
             dst_ip,
             proto,
-            buffer,
+            transport,
             &mut receive_info,
             early_demux_socket,
         )
-        .or_else(|icmp_error| {
+        .or_else(|(transport, icmp_error)| {
+            if let Some(ip_buffer) = owned_ip_buffer {
+                unsafe {
+                    crate::internal::transport_body::reattach_transport_body(
+                        &mut *ip_buffer,
+                        transport,
+                    );
+                }
+            }
             let marks = receive_info.marks;
             match IcmpErrorSender::new(core_ctx, icmp_error, &packet, frame_dst, device, marks) {
                 Some(icmp_sender) => Err(icmp_sender),
@@ -3489,6 +3532,7 @@ pub fn receive_ipv4_packet<
     // This is required because we may need to process the buffer that was
     // passed in or a reassembled one, which have different types.
     let mut buffer: packet::Either<B, Buf<Vec<u8>>> = packet::Either::A(buffer);
+    let mut owned_ip_buffer = owned_ip_buffer_ptr(&mut buffer);
 
     core_ctx.increment_both(device, |c| &c.receive_ip_packet);
     trace!("receive_ip_packet({device:?})");
@@ -3555,6 +3599,7 @@ pub fn receive_ipv4_packet<
         ProcessFragmentResult::Reassembled(buf) => {
             let buf = Buf::new(buf, ..);
             buffer = packet::Either::B(buf);
+            owned_ip_buffer = owned_ip_buffer_ptr(&mut buffer);
 
             match buffer.parse_mut() {
                 Ok(packet) => packet,
@@ -3615,6 +3660,7 @@ pub fn receive_ipv4_packet<
                 packet,
                 packet_metadata,
                 receive_meta,
+                owned_ip_buffer,
             )
             .unwrap_or_else(|icmp_sender| icmp_sender.send(core_ctx, bindings_ctx, buffer));
             return;
@@ -3684,6 +3730,7 @@ pub fn receive_ipv4_packet<
                     packet,
                     packet_metadata.take().unwrap_or_default(),
                     receive_meta,
+                    owned_ip_buffer,
                 )
                 .unwrap_or_else(|icmp_sender| icmp_sender.send(core_ctx, bindings_ctx, buffer));
             }
@@ -3728,6 +3775,7 @@ pub fn receive_ipv4_packet<
                 packet,
                 packet_metadata,
                 receive_meta,
+                owned_ip_buffer,
             )
             .unwrap_or_else(|icmp_sender| icmp_sender.send(core_ctx, bindings_ctx, buffer));
         }
@@ -3898,6 +3946,7 @@ pub fn receive_ipv6_packet<
     // This is required because we may need to process the buffer that was
     // passed in or a reassembled one, which have different types.
     let mut buffer: packet::Either<B, Buf<Vec<u8>>> = packet::Either::A(buffer);
+    let mut owned_ip_buffer = owned_ip_buffer_ptr(&mut buffer);
 
     core_ctx.increment_both(device, |c| &c.receive_ip_packet);
     trace!("receive_ipv6_packet({:?})", device);
@@ -4019,6 +4068,7 @@ pub fn receive_ipv6_packet<
                     ProcessFragmentResult::Reassembled(buf) => {
                         let buf = Buf::new(buf, ..);
                         buffer = packet::Either::B(buf);
+                        owned_ip_buffer = owned_ip_buffer_ptr(&mut buffer);
 
                         match buffer.parse_mut() {
                             Ok(packet) => (packet, None),
@@ -4080,6 +4130,7 @@ pub fn receive_ipv6_packet<
                 packet,
                 packet_metadata,
                 receive_meta,
+                owned_ip_buffer,
             )
             .unwrap_or_else(|icmp_sender| icmp_sender.send(core_ctx, bindings_ctx, buffer));
             return;
@@ -4149,6 +4200,7 @@ pub fn receive_ipv6_packet<
                     packet,
                     packet_metadata.take().unwrap_or_default(),
                     receive_meta,
+                    owned_ip_buffer,
                 )
                 .unwrap_or_else(|icmp_sender| icmp_sender.send(core_ctx, bindings_ctx, buffer));
             }
@@ -4215,6 +4267,7 @@ pub fn receive_ipv6_packet<
                         packet,
                         packet_metadata,
                         meta,
+                        owned_ip_buffer,
                     )
                     .unwrap_or_else(|icmp_sender| icmp_sender.send(core_ctx, bindings_ctx, buffer));
                 }
