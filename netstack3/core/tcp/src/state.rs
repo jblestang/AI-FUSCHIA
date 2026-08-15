@@ -2559,6 +2559,39 @@ impl<I: Instant + 'static, R: ReceiveBuffer, S: SendBuffer, ActiveOpen: Debug>
         *self = new_state;
         newly_closed
     }
+
+    /// Returns `(RCV.NXT, RCV.WND)` when the connection has an active receive window.
+    pub(crate) fn receive_window_snapshot(&self) -> Option<(SeqNum, WindowSize)> {
+        fn from_takeable_rcv<I: Instant, R: ReceiveBuffer>(
+            rcv: &Takeable<Recv<I, R>>,
+        ) -> Option<(SeqNum, WindowSize)> {
+            match rcv {
+                Takeable(Some(rcv)) => {
+                    let wnd = rcv.calculate_window_size().window_size;
+                    Some((rcv.nxt(), wnd))
+                }
+                Takeable(None) => None,
+            }
+        }
+
+        match self {
+            State::SynRcvd(s) => Some((s.rcv.ack, s.rcv.wnd)),
+            State::Established(e) => from_takeable_rcv(&e.rcv),
+            State::FinWait1(f) => from_takeable_rcv(&f.rcv),
+            State::FinWait2(f) => {
+                let wnd = f.rcv.calculate_window_size().window_size;
+                Some((f.rcv.nxt(), wnd))
+            }
+            State::CloseWait(_)
+            | State::Closing(_)
+            | State::LastAck(_)
+            | State::TimeWait(_)
+            | State::Closed(_)
+            | State::Listen(_)
+            | State::SynSent(_) => None,
+        }
+    }
+
     /// Processes an incoming segment and advances the state machine.
     ///
     /// Returns a segment if one needs to be sent; if a passive open connection

@@ -101,8 +101,9 @@ pub use settings::{BufferSizeSettings, SettingsContext};
 pub use socket::SocketDiagnosticsSeed;
 pub use tcp::base::{Control, EffectiveMss, FragmentedPayload, Mss, MssSizeLimiters};
 pub use tcp::segment::{
-    HandshakeOptions, MalformedFlags, Options, Payload, PayloadLen, ResetOptions, SackBlock,
-    SackBlocks, Segment, SegmentHeader, SegmentOptions, VerifiedTcpSegment,
+    HandshakeOptions, MalformedFlags, Options, Payload, PayloadLen, ReceiveWindowOverlap,
+    ResetOptions, SackBlock, SackBlocks, Segment, SegmentHeader, SegmentOptions,
+    VerifiedTcpSegment,
 };
 pub use tcp::seqnum::{SeqNum, UnscaledWindowSize, WindowScale, WindowSize};
 pub use tcp::timestamp::{

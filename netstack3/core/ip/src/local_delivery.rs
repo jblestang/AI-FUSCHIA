@@ -16,6 +16,28 @@ use packet_formats::ipv4::options::Ipv4Option;
 use packet_formats::ipv6::Ipv6Header as _;
 use packet_formats::ipv6::ext_hdrs::{HopByHopOptionData, Ipv6ExtensionHeader};
 
+/// Layer-3 receive metadata delivered alongside socket datagrams/segments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IpReceiveMeta {
+    /// DSCP and ECN from the IP header.
+    pub dscp_and_ecn: DscpAndEcn,
+    /// IPv4 TTL or IPv6 hop limit.
+    pub hop_limit: u8,
+    /// Whether a router-alert option/header was present.
+    pub router_alert: bool,
+}
+
+impl IpReceiveMeta {
+    /// Builds L3 metadata from parsed IP header info.
+    pub fn from_header<I, H: IpHeaderInfo<I>>(header_info: &H) -> Self {
+        Self {
+            dscp_and_ecn: header_info.dscp_and_ecn(),
+            hop_limit: header_info.hop_limit(),
+            router_alert: header_info.router_alert(),
+        }
+    }
+}
+
 /// Informs the transport layer of parameters for transparent local delivery.
 #[derive(Debug, GenericOverIp, Clone)]
 #[generic_over_ip(I, Ip)]

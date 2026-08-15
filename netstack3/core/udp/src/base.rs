@@ -1158,7 +1158,32 @@ impl UdpPacketMeta<Ipv4> {
     }
 }
 
+impl UdpRecvDatagram<Ipv4> {
+    fn to_ipv6_mapped(self) -> UdpRecvDatagram<Ipv6> {
+        UdpRecvDatagram {
+            meta: self.meta.to_ipv6_mapped(),
+            ip_meta: self.ip_meta,
+            view: self.view,
+            payload: self.payload,
+        }
+    }
+}
+
+use netstack3_ip::{IpReceiveMeta, SharedPacketView, transport_packet_view};
+
 use crate::internal::receive_buffer::UdpReceiveBuffer;
+
+fn udp_transport_slice<'a>(
+    packet: &'a UdpPacket<&[u8]>,
+    parse_meta: packet::ParseMetadata,
+) -> &'a [u8] {
+    let header_len = parse_meta.header_len();
+    let total_len = header_len + parse_meta.body_len();
+    let body = packet.body();
+    // SAFETY: The UDP header and body are parsed from a contiguous buffer and
+    // remain contiguous in the original RX frame.
+    unsafe { core::slice::from_raw_parts(body.as_ptr().sub(header_len), total_len) }
+}
 
 fn udp_payload_view(
     frame_storage: &Option<alloc::sync::Arc<[u8]>>,
@@ -1175,13 +1200,50 @@ fn udp_payload_view(
     UdpReceiveBuffer::view(netstack3_ip::PacketSegment::capture(payload))
 }
 
+fn build_udp_recv_datagram<I: IpExt, H: IpHeaderInfo<I>>(
+    meta: UdpPacketMeta<I>,
+    header_info: &H,
+    frame_storage: &Option<alloc::sync::Arc<[u8]>>,
+    transport_slice: &[u8],
+    packet: &packet_formats::udp::UdpPacket<&[u8]>,
+    parse_meta: packet::ParseMetadata,
+) -> UdpRecvDatagram<I> {
+    UdpRecvDatagram {
+        meta,
+        ip_meta: IpReceiveMeta::from_header(header_info),
+        view: transport_packet_view(frame_storage, transport_slice, parse_meta),
+        payload: udp_payload_view(frame_storage, packet),
+    }
+}
+
 /// A datagram dequeued from a socket receive queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UdpRecvDatagram<I: Ip> {
-    /// Source/destination metadata for the datagram.
+    /// Layer-4 metadata (addresses, ports, DSCP/ECN).
     pub meta: UdpPacketMeta<I>,
-    /// Payload bytes (shared, zero-copy on fan-out).
+    /// Layer-3 metadata from the IP header.
+    pub ip_meta: IpReceiveMeta,
+    /// Full received frame with IP, transport, and payload layer ranges.
+    pub view: SharedPacketView,
+    /// UDP payload bytes (shared, zero-copy on fan-out).
     pub payload: UdpReceiveBuffer,
+}
+
+impl<I: Ip> UdpRecvDatagram<I> {
+    /// Returns a refcount-only clone suitable for fan-out delivery.
+    pub fn share(&self) -> Self {
+        Self {
+            meta: self.meta.clone(),
+            ip_meta: self.ip_meta.clone(),
+            view: self.view.clone(),
+            payload: self.payload.share(),
+        }
+    }
+
+    /// Returns a copy with an updated layer-4 metadata field.
+    pub fn with_meta(self, meta: UdpPacketMeta<I>) -> Self {
+        Self { meta, ..self }
+    }
 }
 
 /// Errors that Bindings may encounter when receiving a UDP datagram.
@@ -1197,8 +1259,7 @@ pub trait UdpReceiveBindingsContext<I: IpExt, D: StrongDeviceIdentifier>: UdpBin
         &mut self,
         id: &UdpSocketId<I, D::Weak, Self>,
         device_id: &D,
-        meta: UdpPacketMeta<I>,
-        body: UdpReceiveBuffer,
+        datagram: UdpRecvDatagram<I>,
     ) -> Result<(), ReceiveUdpError>;
 
     /// Dequeues the next received datagram, if any.
@@ -1507,14 +1568,13 @@ fn deliver_udp_datagram<
     bindings_ctx: &mut BC,
     id: &UdpSocketId<I, D::Weak, BC>,
     device_id: &D,
-    meta: UdpPacketMeta<I>,
+    datagram: UdpRecvDatagram<I>,
     header_info: &H,
     packet: &UdpPacket<&[u8]>,
-    body: UdpReceiveBuffer,
     state: &UdpSocketState<I, D::Weak, BC>,
 ) -> Option<Result<(), ReceiveUdpError>> {
     if !bindings_ctx.socket_ingress_filter_active() {
-        return Some(bindings_ctx.receive_udp(id, device_id, meta, body));
+        return Some(bindings_ctx.receive_udp(id, device_id, datagram));
     }
 
     let [ip_prefix, ip_options] = header_info.as_bytes();
@@ -1532,9 +1592,7 @@ fn deliver_udp_datagram<
     );
 
     match filter_result {
-        SocketIngressFilterResult::Accept => {
-            Some(bindings_ctx.receive_udp(id, device_id, meta, body))
-        }
+        SocketIngressFilterResult::Accept => Some(bindings_ctx.receive_udp(id, device_id, datagram)),
         SocketIngressFilterResult::Drop => None,
     }
 }
@@ -1622,10 +1680,9 @@ fn try_deliver_early_demux<
     bindings_ctx: &mut BC,
     id: &UdpSocketId<I, CC::WeakDeviceId, BC>,
     device_id: &CC::DeviceId,
-    meta: UdpPacketMeta<I>,
+    datagram: UdpRecvDatagram<I>,
     header_info: &H,
     packet: &UdpPacket<&[u8]>,
-    body: UdpReceiveBuffer,
 ) -> bool {
     let delivered = core_ctx.with_socket_state(id, |core_ctx, state| {
         let DatagramSocketStateInner::Bound(DatagramBoundSocketState {
@@ -1642,10 +1699,9 @@ fn try_deliver_early_demux<
             bindings_ctx,
             id,
             device_id,
-            meta,
+            datagram,
             header_info,
             packet,
-            body,
             state,
         )
     });
@@ -1665,22 +1721,21 @@ fn deliver_early_demux_socket<
     bindings_ctx: &mut BC,
     socket: I::DualStackBoundSocketId<CC::WeakDeviceId, Udp<BC>>,
     device_id: &CC::DeviceId,
-    meta: UdpPacketMeta<I>,
+    datagram: UdpRecvDatagram<I>,
     header_info: &H,
     packet: &UdpPacket<&[u8]>,
-    body: UdpReceiveBuffer,
 ) -> bool {
     #[cfg(feature = "single-stack")]
     {
         #[derive(GenericOverIp)]
         #[generic_over_ip(I, Ip)]
         struct Inputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
-            meta: UdpPacketMeta<I>,
+            datagram: UdpRecvDatagram<I>,
             socket: I::DualStackBoundSocketId<D, Udp<BT>>,
         }
 
         struct Outputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
-            meta: UdpPacketMeta<I>,
+            datagram: UdpRecvDatagram<I>,
             socket: UdpSocketId<I, D, BT>,
         }
 
@@ -1692,28 +1747,28 @@ fn deliver_early_demux_socket<
         }
 
         let dual_stack_outputs = I::map_ip(
-            Inputs { meta, socket },
-            |Inputs { meta, socket }| match socket {
+            Inputs { datagram, socket },
+            |Inputs { datagram, socket }| match socket {
                 EitherIpSocket::V4(id) => {
-                    DualStackOutputs::CurrentStack(Outputs { meta, socket: id })
+                    DualStackOutputs::CurrentStack(Outputs { datagram, socket: id })
                 }
-                EitherIpSocket::V6(id) => {
-                    DualStackOutputs::OtherStack(Outputs { meta: meta.to_ipv6_mapped(), socket: id })
-                }
+                EitherIpSocket::V6(id) => DualStackOutputs::OtherStack(Outputs {
+                    datagram: datagram.to_ipv6_mapped(),
+                    socket: id,
+                }),
             },
-            |Inputs { meta, socket }| DualStackOutputs::CurrentStack(Outputs { meta, socket }),
+            |Inputs { datagram, socket }| DualStackOutputs::CurrentStack(Outputs { datagram, socket }),
         );
 
         match dual_stack_outputs {
-            DualStackOutputs::CurrentStack(Outputs { meta, socket }) => try_deliver_early_demux(
+            DualStackOutputs::CurrentStack(Outputs { datagram, socket }) => try_deliver_early_demux(
                 core_ctx,
                 bindings_ctx,
                 &socket,
                 device_id,
-                meta,
+                datagram,
                 header_info,
                 packet,
-                body,
             ),
             DualStackOutputs::OtherStack(_) => false,
         }
@@ -1723,12 +1778,12 @@ fn deliver_early_demux_socket<
         #[derive(GenericOverIp)]
         #[generic_over_ip(I, Ip)]
         struct Inputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
-            meta: UdpPacketMeta<I>,
+            datagram: UdpRecvDatagram<I>,
             socket: I::DualStackBoundSocketId<D, Udp<BT>>,
         }
 
         struct Outputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
-            meta: UdpPacketMeta<I>,
+            datagram: UdpRecvDatagram<I>,
             socket: UdpSocketId<I, D, BT>,
         }
 
@@ -1740,38 +1795,37 @@ fn deliver_early_demux_socket<
         }
 
         let dual_stack_outputs = I::map_ip(
-            Inputs { meta, socket },
-            |Inputs { meta, socket }| match socket {
+            Inputs { datagram, socket },
+            |Inputs { datagram, socket }| match socket {
                 EitherIpSocket::V4(id) => {
-                    DualStackOutputs::CurrentStack(Outputs { meta, socket: id })
+                    DualStackOutputs::CurrentStack(Outputs { datagram, socket: id })
                 }
-                EitherIpSocket::V6(id) => {
-                    DualStackOutputs::OtherStack(Outputs { meta: meta.to_ipv6_mapped(), socket: id })
-                }
+                EitherIpSocket::V6(id) => DualStackOutputs::OtherStack(Outputs {
+                    datagram: datagram.to_ipv6_mapped(),
+                    socket: id,
+                }),
             },
-            |Inputs { meta, socket }| DualStackOutputs::CurrentStack(Outputs { meta, socket }),
+            |Inputs { datagram, socket }| DualStackOutputs::CurrentStack(Outputs { datagram, socket }),
         );
 
         match dual_stack_outputs {
-            DualStackOutputs::CurrentStack(Outputs { meta, socket }) => try_deliver_early_demux(
+            DualStackOutputs::CurrentStack(Outputs { datagram, socket }) => try_deliver_early_demux(
                 core_ctx,
                 bindings_ctx,
                 &socket,
                 device_id,
-                meta,
+                datagram,
                 header_info,
                 packet,
-                body,
             ),
-            DualStackOutputs::OtherStack(Outputs { meta, socket }) => try_deliver_early_demux(
+            DualStackOutputs::OtherStack(Outputs { datagram, socket }) => try_deliver_early_demux(
                 core_ctx,
                 bindings_ctx,
                 &socket,
                 device_id,
-                meta,
+                datagram,
                 header_info,
                 packet,
-                body,
             ),
         }
     }
@@ -1813,6 +1867,7 @@ fn receive_ip_packet_early_demux<
         ParsablePacket::<_, UdpParseArgs<I::Addr, &mut NetworkParsingContext>>::parse_metadata(
             &packet,
         );
+    let transport_slice = udp_transport_slice(&packet, parse_meta);
 
     let meta = UdpPacketMeta {
         src_ip,
@@ -1822,16 +1877,16 @@ fn receive_ip_packet_early_demux<
         dscp_and_ecn: header_info.dscp_and_ecn(),
     };
 
-    let body = udp_payload_view(&frame_storage, &packet);
+    let datagram =
+        build_udp_recv_datagram(meta, header_info, &frame_storage, transport_slice, &packet, parse_meta);
     let was_delivered = deliver_early_demux_socket::<I, _, _, _>(
         core_ctx,
         bindings_ctx,
         early_demux_socket,
         device,
-        meta,
+        datagram,
         header_info,
         &packet,
-        body,
     );
 
     if was_delivered {
@@ -1938,6 +1993,7 @@ fn receive_ip_packet<
         ParsablePacket::<_, UdpParseArgs<I::Addr, &mut NetworkParsingContext>>::parse_metadata(
             &packet,
         );
+    let transport_slice = udp_transport_slice(&packet, parse_meta);
 
     /// The maximum number of socket IDs that are expected to receive a given
     /// packet. While it's possible for this number to be exceeded, it's
@@ -1984,18 +2040,18 @@ fn receive_ip_packet<
         dscp_and_ecn: header_info.dscp_and_ecn(),
     };
 
-    let body = udp_payload_view(&frame_storage, &packet);
+    let datagram =
+        build_udp_recv_datagram(meta, header_info, &frame_storage, transport_slice, &packet, parse_meta);
     let was_delivered = recipients.into_iter().fold(false, |was_delivered, lookup_result| {
         let delivered = try_dual_stack_deliver::<I, BC, CC, H>(
             core_ctx,
             bindings_ctx,
             lookup_result,
             device,
-            &meta,
+            datagram.share(),
             require_transparent,
             header_info,
             &packet,
-            body.share(),
         );
         was_delivered | delivered
     });
@@ -2023,11 +2079,10 @@ fn try_deliver<
     bindings_ctx: &mut BC,
     id: &UdpSocketId<I, CC::WeakDeviceId, BC>,
     device_id: &CC::DeviceId,
-    meta: UdpPacketMeta<I>,
+    datagram: UdpRecvDatagram<I>,
     require_transparent: bool,
     header_info: &H,
     packet: &UdpPacket<&[u8]>,
-    body: UdpReceiveBuffer,
 ) -> bool {
     let delivered = core_ctx.with_socket_state(&id, |core_ctx, state| {
         let should_deliver = match &state.inner {
@@ -2057,10 +2112,9 @@ fn try_deliver<
             bindings_ctx,
             id,
             device_id,
-            meta,
+            datagram,
             header_info,
             packet,
-            body,
             state,
         )
     });
@@ -2082,23 +2136,22 @@ fn try_dual_stack_deliver<
     bindings_ctx: &mut BC,
     socket: I::DualStackBoundSocketId<CC::WeakDeviceId, Udp<BC>>,
     device_id: &CC::DeviceId,
-    meta: &UdpPacketMeta<I>,
+    datagram: UdpRecvDatagram<I>,
     require_transparent: bool,
     header_info: &H,
     packet: &UdpPacket<&[u8]>,
-    body: UdpReceiveBuffer,
 ) -> bool {
     #[cfg(feature = "single-stack")]
     {
         #[derive(GenericOverIp)]
         #[generic_over_ip(I, Ip)]
-        struct Inputs<'a, I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
-            meta: &'a UdpPacketMeta<I>,
+        struct Inputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
+            datagram: UdpRecvDatagram<I>,
             socket: I::DualStackBoundSocketId<D, Udp<BT>>,
         }
 
         struct Outputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
-            meta: UdpPacketMeta<I>,
+            datagram: UdpRecvDatagram<I>,
             socket: UdpSocketId<I, D, BT>,
         }
 
@@ -2110,31 +2163,31 @@ fn try_dual_stack_deliver<
         }
 
         let dual_stack_outputs = I::map_ip(
-            Inputs { meta, socket },
-            |Inputs { meta, socket }| match socket {
+            Inputs { datagram, socket },
+            |Inputs { datagram, socket }| match socket {
                 EitherIpSocket::V4(socket) => {
-                    DualStackOutputs::CurrentStack(Outputs { meta: meta.clone(), socket })
+                    DualStackOutputs::CurrentStack(Outputs { datagram, socket })
                 }
-                EitherIpSocket::V6(socket) => {
-                    DualStackOutputs::OtherStack(Outputs { meta: meta.to_ipv6_mapped(), socket })
-                }
+                EitherIpSocket::V6(socket) => DualStackOutputs::OtherStack(Outputs {
+                    datagram: datagram.to_ipv6_mapped(),
+                    socket,
+                }),
             },
-            |Inputs { meta, socket }| {
-                DualStackOutputs::CurrentStack(Outputs { meta: meta.clone(), socket })
+            |Inputs { datagram, socket }| {
+                DualStackOutputs::CurrentStack(Outputs { datagram, socket })
             },
         );
 
         match dual_stack_outputs {
-            DualStackOutputs::CurrentStack(Outputs { meta, socket }) => try_deliver(
+            DualStackOutputs::CurrentStack(Outputs { datagram, socket }) => try_deliver(
                 core_ctx,
                 bindings_ctx,
                 &socket,
                 device_id,
-                meta,
+                datagram,
                 require_transparent,
                 header_info,
                 packet,
-                body,
             ),
             DualStackOutputs::OtherStack(_) => false,
         }
@@ -2143,13 +2196,13 @@ fn try_dual_stack_deliver<
     {
         #[derive(GenericOverIp)]
         #[generic_over_ip(I, Ip)]
-        struct Inputs<'a, I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
-            meta: &'a UdpPacketMeta<I>,
+        struct Inputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
+            datagram: UdpRecvDatagram<I>,
             socket: I::DualStackBoundSocketId<D, Udp<BT>>,
         }
 
         struct Outputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
-            meta: UdpPacketMeta<I>,
+            datagram: UdpRecvDatagram<I>,
             socket: UdpSocketId<I, D, BT>,
         }
 
@@ -2161,42 +2214,41 @@ fn try_dual_stack_deliver<
         }
 
         let dual_stack_outputs = I::map_ip(
-            Inputs { meta, socket },
-            |Inputs { meta, socket }| match socket {
+            Inputs { datagram, socket },
+            |Inputs { datagram, socket }| match socket {
                 EitherIpSocket::V4(socket) => {
-                    DualStackOutputs::CurrentStack(Outputs { meta: meta.clone(), socket })
+                    DualStackOutputs::CurrentStack(Outputs { datagram, socket })
                 }
-                EitherIpSocket::V6(socket) => {
-                    DualStackOutputs::OtherStack(Outputs { meta: meta.to_ipv6_mapped(), socket })
-                }
+                EitherIpSocket::V6(socket) => DualStackOutputs::OtherStack(Outputs {
+                    datagram: datagram.to_ipv6_mapped(),
+                    socket,
+                }),
             },
-            |Inputs { meta, socket }| {
-                DualStackOutputs::CurrentStack(Outputs { meta: meta.clone(), socket })
+            |Inputs { datagram, socket }| {
+                DualStackOutputs::CurrentStack(Outputs { datagram, socket })
             },
         );
 
         match dual_stack_outputs {
-            DualStackOutputs::CurrentStack(Outputs { meta, socket }) => try_deliver(
+            DualStackOutputs::CurrentStack(Outputs { datagram, socket }) => try_deliver(
                 core_ctx,
                 bindings_ctx,
                 &socket,
                 device_id,
-                meta,
+                datagram,
                 require_transparent,
                 header_info,
                 packet,
-                body.share(),
             ),
-            DualStackOutputs::OtherStack(Outputs { meta, socket }) => try_deliver(
+            DualStackOutputs::OtherStack(Outputs { datagram, socket }) => try_deliver(
                 core_ctx,
                 bindings_ctx,
                 &socket,
                 device_id,
-                meta,
+                datagram,
                 require_transparent,
                 header_info,
                 packet,
-                body.share(),
             ),
         }
     }
@@ -3591,9 +3643,26 @@ pub(crate) mod testutils {
     }
 
     #[derive(Debug, PartialEq)]
-    pub(crate) struct ReceivedPacket<I: Ip> {
-        pub(crate) meta: UdpPacketMeta<I>,
-        pub(crate) body: UdpReceiveBuffer,
+    pub(crate) struct ReceivedPacket<I: Ip>(pub(crate) UdpRecvDatagram<I>);
+
+    impl<I: Ip> ReceivedPacket<I> {
+        pub(crate) fn new(meta: UdpPacketMeta<I>, body: UdpReceiveBuffer) -> Self {
+            use alloc::sync::Arc;
+            use netstack3_ip::LayerRanges;
+            Self(UdpRecvDatagram {
+                meta,
+                ip_meta: IpReceiveMeta {
+                    dscp_and_ecn: packet_formats::ip::DscpAndEcn::default(),
+                    hop_limit: 64,
+                    router_alert: false,
+                },
+                view: SharedPacketView::contiguous(
+                    Arc::from([]),
+                    LayerRanges { ip: 0..0, transport: 0..0, payload: 0..0 },
+                ),
+                payload: body,
+            })
+        }
     }
 
     impl<D: FakeStrongDeviceId> FakeUdpCoreCtx<D> {
@@ -3765,7 +3834,7 @@ pub(crate) mod testutils {
                 .map(|(id, SocketReceived { packets, .. })| {
                     (
                         id.clone(),
-                        packets.iter().map(|ReceivedPacket { meta: _, body }| body.as_slice()).collect(),
+                        packets.iter().map(|ReceivedPacket(datagram)| datagram.payload.as_slice()).collect(),
                     )
                 })
                 .collect()
@@ -3779,13 +3848,12 @@ pub(crate) mod testutils {
             &mut self,
             id: &UdpSocketId<I, D::Weak, Self>,
             _device_id: &D,
-            meta: UdpPacketMeta<I>,
-            body: UdpReceiveBuffer,
+            datagram: UdpRecvDatagram<I>,
         ) -> Result<(), ReceiveUdpError> {
             // Throughput benchmarks measure stack receive, not bindings queue behavior.
             #[cfg(feature = "bench-receive")]
             {
-                let _ = (id, meta, body);
+                let _ = (id, datagram);
                 return Ok(());
             }
             #[cfg(not(feature = "bench-receive"))]
@@ -3793,7 +3861,7 @@ pub(crate) mod testutils {
                 let SocketReceived { packets, max_size } =
                     self.state.received_mut::<I>().entry(id.downgrade()).or_default();
                 if packets.len() < *max_size {
-                    packets.push(ReceivedPacket { meta, body });
+                    packets.push(ReceivedPacket(datagram));
                     Ok(())
                 } else {
                     Err(ReceiveUdpError::QueueFull)
@@ -3807,10 +3875,7 @@ pub(crate) mod testutils {
         ) -> Option<UdpRecvDatagram<I>> {
             let SocketReceived { packets, max_size: _ } =
                 self.state.received_mut::<I>().entry(id.downgrade()).or_default();
-            packets.drain(..1).next().map(|ReceivedPacket { meta, body }| UdpRecvDatagram {
-                meta,
-                payload: body,
-            })
+            packets.drain(..1).next().map(|ReceivedPacket(datagram)| datagram)
         }
 
         fn on_socket_error(
@@ -4509,7 +4574,7 @@ mod tests {
             &HashMap::from([(
                 socket.downgrade(),
                 SocketReceived {
-                    packets: vec![ReceivedPacket { meta, body: body.into() }],
+                    packets: vec![ReceivedPacket::new(meta, body.into())],
                     max_size: usize::MAX
                 }
             )])
@@ -5345,7 +5410,7 @@ mod tests {
             .entry(conn1.downgrade())
             .or_default()
             .packets
-            .push(ReceivedPacket { meta: meta, body: body_conn1.into() });
+            .push(ReceivedPacket::new(meta, body_conn1.into()));
         assert_eq!(bindings_ctx.state.received(), &expectations);
 
         let meta = UdpPacketMeta {
@@ -5369,7 +5434,7 @@ mod tests {
             .entry(conn2.downgrade())
             .or_default()
             .packets
-            .push(ReceivedPacket { meta: meta, body: body_conn2.into() });
+            .push(ReceivedPacket::new(meta, body_conn2.into()));
         assert_eq!(bindings_ctx.state.received(), &expectations);
 
         let meta = UdpPacketMeta {
@@ -5393,7 +5458,7 @@ mod tests {
             .entry(list1.downgrade())
             .or_default()
             .packets
-            .push(ReceivedPacket { meta: meta, body: body_list1.into() });
+            .push(ReceivedPacket::new(meta, body_list1.into()));
         assert_eq!(bindings_ctx.state.received(), &expectations);
 
         let meta = UdpPacketMeta {
@@ -5417,7 +5482,7 @@ mod tests {
             .entry(list2.downgrade())
             .or_default()
             .packets
-            .push(ReceivedPacket { meta: meta, body: body_list2.into() });
+            .push(ReceivedPacket::new(meta, body_list2.into()));
         assert_eq!(bindings_ctx.state.received(), &expectations);
 
         let meta = UdpPacketMeta {
@@ -5441,7 +5506,7 @@ mod tests {
             .entry(wildcard_list.downgrade())
             .or_default()
             .packets
-            .push(ReceivedPacket { meta: meta, body: body_wildcard_list.into() });
+            .push(ReceivedPacket::new(meta, body_wildcard_list.into()));
         assert_eq!(bindings_ctx.state.received(), &expectations);
     }
 
@@ -5504,8 +5569,8 @@ mod tests {
                 listener.downgrade(),
                 SocketReceived {
                     packets: vec![
-                        ReceivedPacket { meta: meta_1, body: body.into() },
-                        ReceivedPacket { meta: meta_2, body: body.into() }
+                        ReceivedPacket::new(meta_1, body.into()),
+                        ReceivedPacket::new(meta_2, body.into())
                     ],
                     max_size: usize::MAX,
                 }
@@ -5548,11 +5613,11 @@ mod tests {
             &HashMap::from([(
                 listener.downgrade(),
                 SocketReceived {
-                    packets: vec![ReceivedPacket {
+                    packets: vec![ReceivedPacket::new(
                         meta,
-                        body: UdpReceiveBuffer::from(&body[..]),
-                    }],
-                    max_size: usize::MAX
+                        UdpReceiveBuffer::from(&body[..]),
+                    )],
+                    max_size: usize::MAX,
                 }
             )])
         );
@@ -7566,18 +7631,18 @@ mod tests {
             &HashMap::from([(
                 listener.downgrade(),
                 SocketReceived {
-                    packets: vec![ReceivedPacket {
-                        body: BODY.into(),
-                        meta: UdpPacketMeta::<Ipv6> {
+                    packets: vec![ReceivedPacket::new(
+                        UdpPacketMeta::<Ipv6> {
                             src_ip: REMOTE_IP_MAPPED,
                             src_port: Some(REMOTE_PORT),
                             dst_ip: V4_LOCAL_IP_MAPPED,
                             dst_port: LOCAL_PORT,
                             dscp_and_ecn: DscpAndEcn::default(),
-                        }
-                    }],
+                        },
+                        BODY.into(),
+                    )],
                     max_size: usize::MAX,
-                }
+                },
             )])
         );
     }

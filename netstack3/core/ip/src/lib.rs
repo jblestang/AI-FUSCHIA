@@ -257,8 +257,10 @@ pub use internal::base::{
 pub use internal::counters::{IpCounters, Ipv6RxCounters};
 pub use internal::fragmentation::FragmentationCounters;
 pub use internal::local_delivery::{
-    IpHeaderInfo, LocalDeliveryPacketInfo, ReceiveIpPacketMeta, TransparentLocalDelivery,
+    IpHeaderInfo, IpReceiveMeta, LocalDeliveryPacketInfo, ReceiveIpPacketMeta,
+    TransparentLocalDelivery,
 };
+pub use internal::transport_body::{layer_ranges_in_frame, transport_range_in_storage, transport_packet_view};
 pub use internal::path_mtu::{PmtuCache, PmtuContext};
 pub use internal::pinned_frame::{IntoPinnedFrame, PinnedFrameBuffer, RxFrameStorage};
 pub use internal::fragment_chain::{

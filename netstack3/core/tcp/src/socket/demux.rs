@@ -33,7 +33,7 @@ use netstack3_ip::{
 use netstack3_trace::trace_duration;
 use packet::{
     BufferMut, BufferView as _, EmptyBuf, FragmentedByteSlice, InnerPacketBuilder,
-    NestablePacketBuilder as _, ParseBuffer,
+    NestablePacketBuilder as _, ParsablePacket, ParseBuffer,
 };
 use packet_formats::error::ParseError;
 use packet_formats::ip::IpProto;
@@ -52,8 +52,12 @@ use crate::internal::socket::{
     DoSendLimit, DualStackBaseIpExt, DualStackDemuxIdConverter as _, DualStackIpExt, EitherStack,
     HandshakeStatus, Listener, ListenerAddrState, MaybeDualStack, PrimaryRc, TcpApi,
     TcpBindingsContext, TcpBindingsTypes, TcpContext, TcpDemuxContext, TcpDualStackContext,
-    TcpIpTransportContext, TcpPortSpec, TcpSocketId, TcpSocketSetEntry, TcpSocketState,
+    TcpIpTransportContext, TcpPortSpec, TcpReceiveBindingsContext, TcpSocketId, TcpSocketSetEntry, TcpSocketState,
     TcpSocketStateInner, TcpSocketTxMetadata,
+};
+use crate::internal::receive_segment::{
+    TcpPacketMeta, TcpRecvSegment, TcpSegmentReceiveMeta, build_wire_tcp_recv_segment,
+    tcp_transport_slice,
 };
 use crate::internal::state::{
     BufferProvider, Closed, DataAcked, Initial, NewlyClosed, State, TimeWait,
@@ -78,6 +82,7 @@ impl<I, BC, CC> IpTransportContext<I, BC, CC> for TcpIpTransportContext
 where
     I: DualStackIpExt,
     BC: TcpBindingsContext<CC::DeviceId>
+        + TcpReceiveBindingsContext<I, CC::DeviceId>
         + BufferProvider<
             BC::ReceiveBuffer,
             BC::SendBuffer,
@@ -138,8 +143,9 @@ where
         info: &mut LocalDeliveryPacketInfo<I, H>,
         early_demux_socket: Option<Self::EarlyDemuxSocket>,
     ) -> Result<(), (B, I::IcmpError)> {
-        let LocalDeliveryPacketInfo { meta, header_info, marks, frame_storage: _ } = info;
-        let ReceiveIpPacketMeta { broadcast: _, transparent_override, parsing_context: _, frame_storage: _ } = meta;
+        let LocalDeliveryPacketInfo { meta, header_info, marks, frame_storage } = info;
+        let ReceiveIpPacketMeta { broadcast, transparent_override, parsing_context, frame_storage: _ } =
+            meta;
         if let Some(delivery) = transparent_override {
             warn!(
                 "TODO(https://fxbug.dev/337009139): transparent proxy not supported for TCP \
@@ -223,6 +229,10 @@ where
                 return Ok(());
             }
         };
+        let parse_meta =
+            ParsablePacket::<_, TcpParseArgs<I::Addr, &mut netstack3_base::NetworkParsingContext>>::parse_metadata(
+                &packet,
+            );
         let local_port = packet.dst_port();
         let remote_port = packet.src_port();
         let incoming = match VerifiedTcpSegment::try_from(packet) {
@@ -235,8 +245,25 @@ where
                 return Ok(());
             }
         };
+        let transport_slice = tcp_transport_slice(incoming.tcp_segment(), parse_meta);
+        let incoming_segment: Segment<&[u8]> = (&incoming).into();
         let conn_addr =
             ConnIpAddr { local: (local_ip, local_port), remote: (remote_ip, remote_port) };
+
+        let recv_segment = build_wire_tcp_recv_segment(
+            TcpPacketMeta {
+                src_ip: remote_ip.addr(),
+                src_port: remote_port,
+                dst_ip: local_ip.addr(),
+                dst_port: local_port,
+                dscp_and_ecn: header_info.dscp_and_ecn(),
+            },
+            header_info,
+            &frame_storage,
+            transport_slice,
+            parse_meta,
+            &incoming_segment,
+        );
 
         CounterContext::<TcpCountersWithoutSocket<I>>::counters(core_ctx)
             .valid_segments_received
@@ -248,6 +275,7 @@ where
             device,
             header_info,
             &incoming,
+            recv_segment,
             marks,
             early_demux_socket,
         );
@@ -296,11 +324,13 @@ fn handle_incoming_packet<WireI, BC, CC, H>(
     incoming_device: &CC::DeviceId,
     header_info: &H,
     incoming: &VerifiedTcpSegment<'_>,
+    recv_segment: TcpRecvSegment<WireI>,
     marks: &Marks,
     mut early_demux_socket: Option<DualStackTcpSocketId<WireI, CC::WeakDeviceId, BC>>,
 ) where
     WireI: DualStackIpExt,
     BC: TcpBindingsContext<CC::DeviceId>
+        + TcpReceiveBindingsContext<WireI, CC::DeviceId>
         + BufferProvider<
             BC::ReceiveBuffer,
             BC::SendBuffer,
@@ -351,26 +381,26 @@ fn handle_incoming_packet<WireI, BC, CC, H>(
                 // share the same local and remote IPs and ports.
                 assert_eq!(tw_reuse, None);
                 let disposition = match WireI::as_dual_stack_ip_socket(&demux_conn_id) {
-                    EitherStack::ThisStack(conn_id) => {
-                        try_handle_incoming_for_connection_dual_stack(
-                            core_ctx,
-                            bindings_ctx,
-                            conn_id,
-                            incoming_device,
-                            header_info,
-                            &incoming,
-                        )
-                    }
-                    EitherStack::OtherStack(conn_id) => {
-                        try_handle_incoming_for_connection_dual_stack(
-                            core_ctx,
-                            bindings_ctx,
-                            conn_id,
-                            incoming_device,
-                            header_info,
-                            &incoming,
-                        )
-                    }
+                    EitherStack::ThisStack(conn_id) => try_handle_incoming_for_connection_dual_stack(
+                        core_ctx,
+                        bindings_ctx,
+                        conn_id,
+                        incoming_device,
+                        header_info,
+                        &incoming,
+                        Some(recv_segment.clone()),
+                        Some(&conn_id),
+                    ),
+                    EitherStack::OtherStack(conn_id) => try_handle_incoming_for_connection_dual_stack(
+                        core_ctx,
+                        bindings_ctx,
+                        conn_id,
+                        incoming_device,
+                        header_info,
+                        &incoming,
+                        None,
+                        None,
+                    ),
                 };
                 match disposition {
                     ConnectionIncomingSegmentDisposition::Destroy => {
@@ -618,11 +648,14 @@ fn try_handle_incoming_for_connection_dual_stack<SockI, WireI, CC, BC, H>(
     incoming_device: &CC::DeviceId,
     header_info: &H,
     incoming: &VerifiedTcpSegment<'_>,
+    recv_segment: Option<TcpRecvSegment<WireI>>,
+    wire_delivery_id: Option<&TcpSocketId<WireI, CC::WeakDeviceId, BC>>,
 ) -> ConnectionIncomingSegmentDisposition
 where
     SockI: DualStackIpExt,
-    WireI: Ip,
+    WireI: DualStackIpExt,
     BC: TcpBindingsContext<CC::DeviceId>
+        + TcpReceiveBindingsContext<WireI, CC::DeviceId>
         + BufferProvider<
             BC::ReceiveBuffer,
             BC::SendBuffer,
@@ -693,6 +726,23 @@ where
 
         match this_or_other_stack {
             EitherStack::ThisStack((core_ctx, conn, conn_addr, demux_conn_id)) => {
+                let incoming_segment: Segment<&[u8]> = incoming.into();
+                if let (Some(wire), Some(delivery_id)) = (recv_segment, wire_delivery_id) {
+                    let tcp_meta = conn
+                        .state
+                        .receive_window_snapshot()
+                        .map(|(rcv_nxt, rwnd)| {
+                            TcpSegmentReceiveMeta::from_segment_and_window(
+                                &incoming_segment,
+                                rcv_nxt,
+                                rwnd,
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            TcpSegmentReceiveMeta::from_segment_wire(&incoming_segment)
+                        });
+                    bindings_ctx.receive_tcp_segment(delivery_id, wire.with_tcp(tcp_meta));
+                }
                 try_handle_incoming_for_connection::<_, _, CC, _, _>(
                     core_ctx,
                     bindings_ctx,
@@ -702,7 +752,7 @@ where
                     socket_options,
                     conn,
                     timer,
-                    incoming.into(),
+                    incoming_segment,
                 )
             }
             EitherStack::OtherStack((core_ctx, conn, conn_addr, demux_conn_id)) => {

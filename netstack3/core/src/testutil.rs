@@ -81,7 +81,8 @@ use netstack3_ip::{
 };
 use netstack3_tcp::testutil::{ClientBuffers, ProvidedBuffers, RingBuffer, TestSendBuffer};
 use netstack3_tcp::{
-    BufferSizes, TcpBindingsTypes, TcpSocketDestructionContext, TcpSocketDiagnostics,
+    BufferSizes, TcpBindingsTypes, TcpReceiveBindingsContext, TcpRecvSegment,
+    TcpSocketDestructionContext, TcpSocketDiagnostics, TcpSocketId,
 };
 use netstack3_udp::{
     ReceiveUdpError, UdpBindingsTypes, UdpPacketMeta, UdpReceiveBindingsContext, UdpReceiveBuffer,
@@ -598,6 +599,14 @@ pub struct FakeBindingsCtxState {
         UdpSocketId<Ipv6, WeakDeviceId<FakeBindingsCtx>, FakeBindingsCtx>,
         Vec<UdpRecvDatagram<Ipv6>>,
     >,
+    tcpv4_received: HashMap<
+        TcpSocketId<Ipv4, WeakDeviceId<FakeBindingsCtx>, FakeBindingsCtx>,
+        Vec<TcpRecvSegment<Ipv4>>,
+    >,
+    tcpv6_received: HashMap<
+        TcpSocketId<Ipv6, WeakDeviceId<FakeBindingsCtx>, FakeBindingsCtx>,
+        Vec<TcpRecvSegment<Ipv6>>,
+    >,
     /// IDs with rx queue signaled available.
     pub rx_available: Vec<LoopbackDeviceId<FakeBindingsCtx>>,
     /// IDs with tx queue signaled available.
@@ -624,6 +633,26 @@ impl FakeBindingsCtxState {
             self,
             |this| Wrapper(&mut this.udpv4_received),
             |this| Wrapper(&mut this.udpv6_received),
+        );
+        map
+    }
+
+    pub(crate) fn tcp_state_mut<I: IpExt>(
+        &mut self,
+    ) -> &mut HashMap<TcpSocketId<I, WeakDeviceId<FakeBindingsCtx>, FakeBindingsCtx>, Vec<TcpRecvSegment<I>>>
+    {
+        #[derive(GenericOverIp)]
+        #[generic_over_ip(I, Ip)]
+        struct Wrapper<'a, I: IpExt>(
+            &'a mut HashMap<
+                TcpSocketId<I, WeakDeviceId<FakeBindingsCtx>, FakeBindingsCtx>,
+                Vec<TcpRecvSegment<I>>,
+            >,
+        );
+        let Wrapper(map) = I::map_ip_out::<_, Wrapper<'_, I>>(
+            self,
+            |this| Wrapper(&mut this.tcpv4_received),
+            |this| Wrapper(&mut this.tcpv6_received),
         );
         map
     }
@@ -1396,12 +1425,11 @@ impl<I: IpExt> UdpReceiveBindingsContext<I, DeviceId<Self>> for FakeBindingsCtx 
         &mut self,
         id: &UdpSocketId<I, WeakDeviceId<Self>, FakeBindingsCtx>,
         _device_id: &DeviceId<Self>,
-        meta: UdpPacketMeta<I>,
-        body: UdpReceiveBuffer,
+        datagram: UdpRecvDatagram<I>,
     ) -> Result<(), ReceiveUdpError> {
         let mut state = self.state_mut();
         let received = (&mut *state).udp_state_mut::<I>().entry(id.clone()).or_insert_with(Vec::default);
-        received.push(UdpRecvDatagram { meta, payload: body });
+        received.push(datagram);
         Ok(())
     }
 
@@ -1418,6 +1446,27 @@ impl<I: IpExt> UdpReceiveBindingsContext<I, DeviceId<Self>> for FakeBindingsCtx 
         _id: &UdpSocketId<I, WeakDeviceId<Self>, FakeBindingsCtx>,
         _err: PendingDatagramSocketError,
     ) {
+    }
+}
+
+impl<I: IpExt> TcpReceiveBindingsContext<I, DeviceId<Self>> for FakeBindingsCtx {
+    fn receive_tcp_segment(
+        &mut self,
+        id: &TcpSocketId<I, WeakDeviceId<Self>, FakeBindingsCtx>,
+        segment: TcpRecvSegment<I>,
+    ) {
+        let mut state = self.state_mut();
+        let received =
+            (&mut *state).tcp_state_mut::<I>().entry(id.clone()).or_insert_with(Vec::default);
+        received.push(segment);
+    }
+
+    fn try_recv_tcp_segment(
+        &mut self,
+        id: &TcpSocketId<I, WeakDeviceId<Self>, FakeBindingsCtx>,
+    ) -> Option<TcpRecvSegment<I>> {
+        let state = self.state_mut();
+        state.tcp_state_mut::<I>().get_mut(id).and_then(|queue| queue.drain(..1).next())
     }
 }
 

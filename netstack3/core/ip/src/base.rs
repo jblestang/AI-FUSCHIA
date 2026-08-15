@@ -92,7 +92,7 @@ use crate::internal::multicast_forwarding::{
     MulticastForwardingTimerId,
 };
 use crate::internal::path_mtu::{PmtuBindingsTypes, PmtuCache, PmtuTimerId};
-use crate::internal::pinned_frame::{IntoPinnedFrame, PinnedFrameBuffer};
+use crate::internal::pinned_frame::{IntoPinnedFrame, PinnedFrameBuffer, RxFrameStorage};
 use crate::internal::raw::counters::RawIpSocketCounters;
 use crate::internal::raw::{RawIpSocketHandler, RawIpSocketMap, RawIpSocketsBindingsTypes};
 use crate::internal::reassembly::{
@@ -3508,6 +3508,7 @@ pub fn receive_ipv4_packet<
     }
 
     let mut buffer = buffer.into_pinned_frame();
+    let rx_frame_storage = buffer.rx_frame_storage();
 
     core_ctx.increment_both(device, |c| &c.receive_ip_packet);
     trace!("receive_ip_packet({device:?})");
@@ -3620,7 +3621,7 @@ pub fn receive_ipv4_packet<
                 broadcast: None,
                 transparent_override: Some(TransparentLocalDelivery { addr, port }),
                 parsing_context,
-                frame_storage: None,
+                frame_storage: rx_frame_storage.clone(),
             };
 
             // Short-circuit the routing process and override local demux, providing a local
@@ -3694,7 +3695,7 @@ pub fn receive_ipv4_packet<
                     broadcast: address_status.to_broadcast_marker(),
                     transparent_override: None,
                     parsing_context,
-                    frame_storage: None,
+                    frame_storage: rx_frame_storage.clone(),
                 };
                 dispatch_receive_ipv4_packet(
                     core_ctx,
@@ -3739,7 +3740,7 @@ pub fn receive_ipv4_packet<
                 broadcast: address_status.to_broadcast_marker(),
                 transparent_override: None,
                 parsing_context,
-                frame_storage: None,
+                frame_storage: rx_frame_storage.clone(),
             };
             dispatch_receive_ipv4_packet(
                 core_ctx,
@@ -3917,6 +3918,7 @@ pub fn receive_ipv6_packet<
     }
 
     let mut buffer = buffer.into_pinned_frame();
+    let rx_frame_storage = buffer.rx_frame_storage();
 
     core_ctx.increment_both(device, |c| &c.receive_ip_packet);
     trace!("receive_ipv6_packet({:?})", device);
@@ -4085,7 +4087,7 @@ pub fn receive_ipv6_packet<
                 broadcast: None,
                 transparent_override: Some(TransparentLocalDelivery { addr, port }),
                 parsing_context,
-                frame_storage: None,
+                frame_storage: rx_frame_storage.clone(),
             };
 
             // Short-circuit the routing process and override local demux, providing a local
@@ -4158,7 +4160,7 @@ pub fn receive_ipv6_packet<
                     broadcast: None,
                     transparent_override: None,
                     parsing_context,
-                    frame_storage: None,
+                    frame_storage: rx_frame_storage.clone(),
                 };
 
                 dispatch_receive_ipv6_packet(
@@ -4226,7 +4228,7 @@ pub fn receive_ipv6_packet<
                         broadcast: None,
                         transparent_override: None,
                         parsing_context,
-                        frame_storage: None,
+                        frame_storage: rx_frame_storage.clone(),
                     };
                     dispatch_receive_ipv6_packet(
                         core_ctx,

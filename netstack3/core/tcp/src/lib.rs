@@ -24,6 +24,7 @@ mod internal {
     pub(super) mod congestion;
     pub(super) mod counters;
     pub(super) mod rtt;
+    pub(super) mod receive_segment;
     pub(super) mod sack_scoreboard;
     pub(super) mod seq_ranges;
     pub(super) mod settings;
@@ -43,7 +44,11 @@ pub use internal::buffer::{Buffer, BufferLimits, IntoBuffers, ReceiveBuffer, Sen
 pub use internal::counters::{
     CombinedTcpCounters, TcpCountersWithSocket, TcpCountersWithoutSocket,
 };
-pub use internal::settings::TcpSettings;
+pub use internal::receive_segment::{
+    TcpPacketMeta, TcpRecvSegment, TcpSegmentReceiveMeta, build_tcp_recv_segment,
+    build_wire_tcp_recv_segment,
+};
+pub use internal::socket::TcpReceiveBindingsContext;
 pub use internal::socket::accept_queue::ListenerNotifier;
 pub use internal::socket::demux::DualStackTcpSocketId;
 pub use internal::socket::diagnostics::{

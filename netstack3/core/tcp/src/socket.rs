@@ -510,6 +510,25 @@ pub trait TcpSocketDestructionContext: ReferenceNotifiers + InstantContext {
         S: SocketDiagnosticsSeed<Output = TcpSocketDiagnostics<I, Self::Instant>> + Send;
 }
 
+/// Bindings context for per-segment TCP receive delivery (alongside stream buffers).
+pub trait TcpReceiveBindingsContext<I: DualStackIpExt, D: StrongDeviceIdentifier>: TcpBindingsTypes + Sized {
+    /// Delivers a received TCP segment with layered packet views to a socket.
+    fn receive_tcp_segment(
+        &mut self,
+        _id: &TcpSocketId<I, D::Weak, Self>,
+        _segment: crate::internal::receive_segment::TcpRecvSegment<I>,
+    ) {
+    }
+
+    /// Dequeues the next received segment view, if any.
+    fn try_recv_tcp_segment(
+        &mut self,
+        _id: &TcpSocketId<I, D::Weak, Self>,
+    ) -> Option<crate::internal::receive_segment::TcpRecvSegment<I>> {
+        None
+    }
+}
+
 /// The bindings context for TCP.
 ///
 /// TCP timers are scoped by weak device IDs.

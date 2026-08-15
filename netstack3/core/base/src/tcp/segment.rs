@@ -22,6 +22,17 @@ use super::base::{Control, Mss};
 use super::seqnum::{SeqNum, UnscaledWindowSize, WindowScale, WindowSize};
 use super::timestamp::TimestampOption;
 
+/// How a TCP segment intersects the current receive window (before overlap trim).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiveWindowOverlap {
+    /// Whether any part of the segment lies in the receive window.
+    pub acceptable: bool,
+    /// Sequence-space bytes trimmed from the front (SEG.SEQ .. accepted_seq).
+    pub trim_prefix: u32,
+    /// Accepted length in sequence-number space after window trim.
+    pub accepted_len: u32,
+}
+
 /// A TCP segment.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Segment<P> {
@@ -621,6 +632,40 @@ impl<P: Payload> Segment<P> {
                 data: new_data,
             }
         })
+    }
+
+    /// Describes how this segment intersects the receive window before overlap trimming.
+    ///
+    /// The internal TCP state machine uses the same math in [`Self::overlap`]; bindings
+    /// can use this to detect window trims and retransmission overlap without running
+    /// overlap handling themselves.
+    pub fn receive_window_overlap(&self, rnxt: SeqNum, rwnd: WindowSize) -> ReceiveWindowOverlap {
+        let len = self.len();
+        let SegmentHeader { seq, .. } = self.header;
+        let acceptable = match (len, rwnd) {
+            (0, WindowSize::ZERO) => seq == rnxt,
+            (0, rwnd) => !rnxt.after(seq) && seq.before(rnxt + rwnd),
+            (_len, WindowSize::ZERO) => false,
+            (len, rwnd) => {
+                (!rnxt.after(seq) && seq.before(rnxt + rwnd))
+                    || (!(seq + len).before(rnxt) && !(seq + len).after(rnxt + rwnd))
+            }
+        };
+        if !acceptable {
+            return ReceiveWindowOverlap {
+                acceptable: false,
+                trim_prefix: 0,
+                accepted_len: 0,
+            };
+        }
+        let cmp = |lhs: &SeqNum, rhs: &SeqNum| (*lhs - *rhs).cmp(&0);
+        let accepted_seq = core::cmp::max_by(seq, rnxt, cmp);
+        let accepted_len = core::cmp::min_by(seq + len, rnxt + rwnd, cmp) - accepted_seq;
+        ReceiveWindowOverlap {
+            acceptable: true,
+            trim_prefix: u32::try_from(accepted_seq - seq).unwrap_or(0),
+            accepted_len: u32::try_from(accepted_len).unwrap_or(0),
+        }
     }
 
     /// Creates a segment with no data.
