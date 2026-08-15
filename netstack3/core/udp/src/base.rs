@@ -1474,6 +1474,10 @@ fn deliver_udp_datagram<
     packet: &UdpPacket<&[u8]>,
     state: &UdpSocketState<I, D::Weak, BC>,
 ) -> Option<Result<(), ReceiveUdpError>> {
+    if !bindings_ctx.socket_ingress_filter_active() {
+        return Some(bindings_ctx.receive_udp(id, device_id, meta, packet.body()));
+    }
+
     let [ip_prefix, ip_options] = header_info.as_bytes();
     let [udp_header, data] = packet.as_bytes();
     let mut slices = [ip_prefix, ip_options, udp_header, data];
@@ -1728,7 +1732,6 @@ fn receive_ip_packet<
     let ReceiveIpPacketMeta { broadcast, transparent_override, parsing_context } = meta;
 
     trace_duration!("udp::receive_ip_packet");
-    CounterContext::<UdpCountersWithoutSocket<I>>::counters(core_ctx).rx.increment();
     trace!("received UDP packet: {:x?}", buffer.as_mut());
     let src_ip: I::Addr = src_ip.into_addr();
 
@@ -1745,6 +1748,8 @@ fn receive_ip_packet<
             early_demux_socket.expect("checked is_some above"),
         );
     }
+
+    CounterContext::<UdpCountersWithoutSocket<I>>::counters(core_ctx).rx.increment();
 
     let Ok(packet) = buffer.parse_with::<_, UdpPacket<_>>(UdpParseArgs::with_context(
         src_ip,
