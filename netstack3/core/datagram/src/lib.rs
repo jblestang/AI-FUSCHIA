@@ -49,7 +49,7 @@ pub use internal::spec_context::{
 };
 
 /// Datagram socket test utilities.
-#[cfg(any(test, feature = "testutils"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
 pub mod testutil {
     pub use crate::internal::datagram::create_primary_id;
     pub use crate::internal::datagram::testutil::setup_fake_ctx_with_dualstack_conn_addrs;

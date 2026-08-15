@@ -30,6 +30,16 @@
 // 3. Induce the compiler to produce `adc` instruction: this is a very
 //    useful instruction to implement 1's complement addition and available
 //    on both x86 and ARM. The functions `adc_uXX` are for this use.
+//
+// 4. AVX2 fast path (x86_64 only): for buffers larger than
+//    [`AVX2_CHECKSUM_THRESHOLD`], accumulate with AVX2 using 32-bit chunks
+//    zero-extended into 64-bit lanes. The upper 32 bits of each lane defer
+//    carries so many chunks can be summed in parallel before folding into
+//    the u128 scalar accumulator (see BESS `CalculateSum`).
+
+/// Minimum buffer length (exclusive) to use the AVX2 checksum fast path.
+#[cfg(target_arch = "x86_64")]
+const AVX2_CHECKSUM_THRESHOLD: usize = 256;
 
 /// Compute the checksum of "bytes".
 ///
@@ -156,29 +166,19 @@ impl Checksum {
             bytes = &bytes[1..];
         }
 
-        // NB: Even though our accumulator is 16 bytes, summing in 8 byte chunks
-        // (rather than 16 byte chunks) leads to better optimized machine code
-        // on 64 bit platforms.
-        while let Some(chunk) = bytes.first_chunk::<8>() {
-            sum += u64::from_ne_bytes(*chunk) as u128;
-            bytes = &bytes[8..];
+        #[cfg(target_arch = "x86_64")]
+        if bytes.len() > AVX2_CHECKSUM_THRESHOLD && avx2_available() {
+            // SAFETY: `avx2_available()` checks for AVX2 support at runtime.
+            let (new_sum, remainder) = unsafe { add_u64_chunks_avx2(sum, bytes) };
+            sum = new_sum;
+            bytes = remainder;
         }
 
-        // Handle the tail.
-        if let Some(chunk) = bytes.first_chunk::<4>() {
-            sum += u32::from_ne_bytes(*chunk) as u128;
-            bytes = &bytes[4..];
-        }
-        if let Some(chunk) = bytes.first_chunk::<2>() {
-            sum += u16::from_ne_bytes(*chunk) as u128;
-            bytes = &bytes[2..];
-        }
-        if bytes.len() == 1 {
-            // Stash the trailing byte.
-            self.trailing_byte = Some(bytes[0]);
-        }
-
+        let (sum, trailing_byte) = add_bytes_scalar_tail(sum, bytes);
         self.sum = sum;
+        if let Some(byte) = trailing_byte {
+            self.trailing_byte = Some(byte);
+        }
     }
 
     /// Computes the checksum, but in big endian byte order.
@@ -237,6 +237,108 @@ macro_rules! impl_adc {
 impl_adc!(adc_u16, u16);
 impl_adc!(adc_u32, u32);
 impl_adc!(adc_u64, u64);
+
+/// Adds the remaining bytes to `sum` using the scalar u64/u32/u16 fast path.
+///
+/// Returns the updated sum and an optional trailing byte when `bytes` has odd
+/// length.
+#[inline]
+fn add_bytes_scalar_tail(mut sum: u128, mut bytes: &[u8]) -> (u128, Option<u8>) {
+    // NB: Even though our accumulator is 16 bytes, summing in 8 byte chunks
+    // (rather than 16 byte chunks) leads to better optimized machine code
+    // on 64 bit platforms.
+    while let Some(chunk) = bytes.first_chunk::<8>() {
+        sum += u64::from_ne_bytes(*chunk) as u128;
+        bytes = &bytes[8..];
+    }
+
+    // Handle the tail.
+    if let Some(chunk) = bytes.first_chunk::<4>() {
+        sum += u32::from_ne_bytes(*chunk) as u128;
+        bytes = &bytes[4..];
+    }
+    if let Some(chunk) = bytes.first_chunk::<2>() {
+        sum += u16::from_ne_bytes(*chunk) as u128;
+        bytes = &bytes[2..];
+    }
+    let trailing_byte = if bytes.len() == 1 { Some(bytes[0]) } else { None };
+    (sum, trailing_byte)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn avx2_available() -> bool {
+    std::is_x86_feature_detected!("avx2")
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn add_u64_chunks_avx2(mut sum: u128, mut bytes: &[u8]) -> (u128, &[u8]) {
+    use core::arch::x86_64::{
+        __m256i, _mm256_add_epi64, _mm256_loadu_si256, _mm256_setzero_si256, _mm256_unpackhi_epi32,
+        _mm256_unpacklo_epi32,
+    };
+
+    let zero = _mm256_setzero_si256();
+    let mut sum_a_lo: __m256i = zero;
+    let mut sum_a_hi: __m256i = zero;
+    let mut sum_b_lo: __m256i = zero;
+    let mut sum_b_hi: __m256i = zero;
+
+    // Dual-stream accumulation minimizes dependency chains (see BESS checksum).
+    if bytes.len() >= 64 {
+        let a = _mm256_loadu_si256(bytes.as_ptr().cast());
+        let b = _mm256_loadu_si256(bytes.as_ptr().add(32).cast());
+        sum_a_lo = _mm256_unpacklo_epi32(a, zero);
+        sum_a_hi = _mm256_unpackhi_epi32(a, zero);
+        sum_b_lo = _mm256_unpacklo_epi32(b, zero);
+        sum_b_hi = _mm256_unpackhi_epi32(b, zero);
+        bytes = &bytes[64..];
+
+        while bytes.len() >= 64 {
+            let a = _mm256_loadu_si256(bytes.as_ptr().cast());
+            let b = _mm256_loadu_si256(bytes.as_ptr().add(32).cast());
+            sum_a_lo = _mm256_add_epi64(sum_a_lo, _mm256_unpacklo_epi32(a, zero));
+            sum_a_hi = _mm256_add_epi64(sum_a_hi, _mm256_unpackhi_epi32(a, zero));
+            sum_b_lo = _mm256_add_epi64(sum_b_lo, _mm256_unpacklo_epi32(b, zero));
+            sum_b_hi = _mm256_add_epi64(sum_b_hi, _mm256_unpackhi_epi32(b, zero));
+            bytes = &bytes[64..];
+        }
+    }
+
+    if bytes.len() >= 32 {
+        let a = _mm256_loadu_si256(bytes.as_ptr().cast());
+        sum_a_lo = _mm256_add_epi64(sum_a_lo, _mm256_unpacklo_epi32(a, zero));
+        sum_a_hi = _mm256_add_epi64(sum_a_hi, _mm256_unpackhi_epi32(a, zero));
+        bytes = &bytes[32..];
+    }
+
+    let combined = _mm256_add_epi64(
+        _mm256_add_epi64(sum_a_lo, sum_a_hi),
+        _mm256_add_epi64(sum_b_lo, sum_b_hi),
+    );
+    sum = fold_m256i_epi64_to_u128(sum, combined);
+
+    (sum, bytes)
+}
+
+/// Folds four u64 lanes from an AVX2 accumulator into a u128 one's-complement
+/// sum. Each lane may already contain deferred 32-bit carries in its upper
+/// half; folding into u128 preserves full precision before final normalization.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn fold_m256i_epi64_to_u128(mut sum: u128, v: core::arch::x86_64::__m256i) -> u128 {
+    use core::arch::x86_64::_mm256_storeu_si256;
+
+    let mut lanes = [0u64; 4];
+    _mm256_storeu_si256(lanes.as_mut_ptr().cast(), v);
+    sum += lanes[0] as u128;
+    sum += lanes[1] as u128;
+    sum += lanes[2] as u128;
+    sum += lanes[3] as u128;
+    sum
+}
 
 /// Normalizes the accumulator by mopping up the
 /// overflow until it fits in a `u16`.
@@ -478,6 +580,57 @@ mod tests {
         c.add_bytes(&[0]);
         c.add_bytes(&[0]);
         assert_eq!(c.checksum(), [255, 255]);
+    }
+
+    /// Computes a checksum without using the AVX2 fast path by feeding at most
+    /// [`super::AVX2_CHECKSUM_THRESHOLD`] bytes per call.
+    fn checksum_scalar_chunks(bytes: &[u8]) -> [u8; 2] {
+        let mut c = Checksum::new();
+        for chunk in bytes.chunks(super::AVX2_CHECKSUM_THRESHOLD) {
+            c.add_bytes(chunk);
+        }
+        c.checksum()
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_avx2_matches_scalar() {
+        if !super::avx2_available() {
+            return;
+        }
+
+        let mut rng = new_rng(0xA7B2_C0DE);
+
+        for len in [257, 512, 1024, 4096, 9000, 16_384] {
+            let mut buf = vec![0u8; len];
+            rng.fill(&mut buf[..]);
+            let scalar = checksum_scalar_chunks(&buf);
+            let mut c = Checksum::new();
+            c.add_bytes(&buf);
+            let avx = c.checksum();
+            assert_eq!(avx, scalar, "len={len}");
+        }
+
+        // Odd lengths exercise trailing-byte handling across the threshold.
+        // Odd lengths exercise trailing-byte handling across the threshold.
+        for len in [255, 256, 257, 511, 512, 513] {
+            let mut buf = vec![0u8; len];
+            rng.fill(&mut buf[..]);
+            let scalar = checksum_scalar_chunks(&buf);
+            let mut c = Checksum::new();
+            c.add_bytes(&buf);
+            let avx = c.checksum();
+            assert_eq!(avx, scalar, "len={len}");
+        }
+
+        // Uniform bytes stress lane accumulation (would fail if u64 lanes wrapped).
+        for len in [512, 1024, 4096, 9000] {
+            let buf = vec![0xABu8; len];
+            let scalar = checksum_scalar_chunks(&buf);
+            let mut c = Checksum::new();
+            c.add_bytes(&buf);
+            assert_eq!(c.checksum(), scalar, "uniform len={len}");
+        }
     }
 
     // Regression test for https://fxbug.dev/515753165.

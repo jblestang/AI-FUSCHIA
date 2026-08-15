@@ -828,6 +828,10 @@ impl SocketOpsFilterBindingContext<DeviceId<FakeBindingsCtx>> for FakeBindingsCt
     fn socket_ops_filter(&self) -> impl SocketOpsFilter<DeviceId<FakeBindingsCtx>> {
         NoOpSocketOpsFilter
     }
+
+    fn socket_ingress_filter_active(&self) -> bool {
+        false
+    }
 }
 
 impl WithFakeTimerContext<TimerId<FakeBindingsCtx>> for FakeBindingsCtx {

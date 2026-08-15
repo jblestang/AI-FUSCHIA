@@ -582,7 +582,7 @@ fn set_ipv4_fragment(
 /// Counters kept by the IP stack pertaining to fragmentation.
 #[derive(Default, Debug)]
 #[cfg_attr(
-    any(test, feature = "testutils"),
+    any(test, feature = "testutils", feature = "benchmark-harness"),
     derive(PartialEq, netstack3_macros::CounterCollection)
 )]
 pub struct FragmentationCounters<C = Counter> {

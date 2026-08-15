@@ -209,7 +209,7 @@ impl From<Ipv6DeviceAddr> for IpDeviceAddr<Ipv6Addr> {
     }
 }
 
-#[cfg(any(test, feature = "testutils"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
 pub mod testutil {
     use net_types::ip::GenericOverIp;
 

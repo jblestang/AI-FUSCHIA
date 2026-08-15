@@ -6063,6 +6063,10 @@ mod tests {
         fn socket_ops_filter(&self) -> impl SocketOpsFilter<D> {
             NoOpSocketOpsFilter
         }
+
+        fn socket_ingress_filter_active(&self) -> bool {
+            false
+        }
     }
 
     /// Delegate implementation to internal thing.

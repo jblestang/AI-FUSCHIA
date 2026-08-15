@@ -90,7 +90,7 @@ impl<BC: SlaacBindingsTypes + TimerContext> SlaacState<BC> {
     }
 
     /// Provides direct access to the internal timer heap.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub fn timers(&self) -> &LocalTimerHeap<InnerSlaacTimerId, (), BC> {
         &self.timers
     }
@@ -109,7 +109,7 @@ impl<D: WeakDeviceIdentifier> SlaacTimerId<D> {
     }
 
     /// Creates a new SLAAC timer id for `device_id`.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub fn new(device_id: D) -> Self {
         Self { device_id }
     }
@@ -1135,12 +1135,12 @@ impl StableSlaacAddressConfiguration {
     pub const DEFAULT_IDGEN_RETRIES: u8 = 3;
 
     /// Enable stable addressing, using the EUI-64 method to derive the IID.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub const ENABLED_WITH_EUI64: Self =
         Self::Enabled { iid_generation: IidGenerationConfiguration::Eui64 };
 
     /// Enable stable addressing, using opaque IIDs.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub const ENABLED_WITH_OPAQUE_IIDS: Self = Self::Enabled {
         iid_generation: IidGenerationConfiguration::Opaque {
             idgen_retries: Self::DEFAULT_IDGEN_RETRIES,
@@ -2040,7 +2040,7 @@ fn add_slaac_addr_sub<BC: SlaacBindingsContext<CC::DeviceId>, CC: SlaacContext<B
     }
 }
 
-#[cfg(any(test, feature = "testutils"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
 pub(crate) mod testutil {
     use super::*;
 

@@ -54,7 +54,7 @@ impl<S: DatagramSocketSpec> SendBufferTracking<S> {
         tracking.capacity().into()
     }
 
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub(crate) fn available(&self) -> usize {
         let Self(tracking) = self;
         tracking.available().map(Into::into).unwrap_or(0)
@@ -144,7 +144,7 @@ impl<I: IpExt, D: WeakDeviceIdentifier, S: DatagramSocketSpec> Drop for TxMetada
     }
 }
 
-#[cfg(any(test, feature = "testutils"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
 impl<I: IpExt, D: WeakDeviceIdentifier, S: DatagramSocketSpec> PartialEq for TxMetadata<I, D, S> {
     fn eq(&self, other: &Self) -> bool {
         // Tx metadata is always a unique instance accompanying a frame and it's

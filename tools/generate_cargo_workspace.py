@@ -464,7 +464,10 @@ netstack3_macros = { package = "netstack3-macros", path = "../macros" }
     render(
         "netstack3/core/udp",
         pkg("netstack3-udp", lib_name="netstack3_udp") + stack_features + """
+benchmark = ["testutils", "netstack3_base/testutils", "netstack3_ip/testutils", "netstack3_filter/testutils", "netstack3_datagram/testutils", "dep:criterion"]
+
 [dependencies]
+criterion = { workspace = true, optional = true }
 derivative = { workspace = true, features = ["use_core"] }
 either = { workspace = true }
 lock_order = { package = "lock-order", path = "../lock-order" }
@@ -475,6 +478,7 @@ netstack3_datagram = { package = "netstack3-datagram", path = "../datagram" }
 netstack3_filter = { package = "netstack3-filter", path = "../filter" }
 netstack3_hashmap = { package = "netstack3-hashmap", path = "../hashmap" }
 netstack3_ip = { package = "netstack3-ip", path = "../ip" }
+netstack3_macros = { package = "netstack3-macros", path = "../macros" }
 netstack3_trace = { package = "netstack3-trace", path = "../trace" }
 packet = { path = "../../../libs/packet" }
 packet_formats = { package = "packet_formats", path = "../../../libs/packet-formats" }
@@ -483,6 +487,11 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 netstack3_macros = { package = "netstack3-macros", path = "../macros" }
+
+[[bench]]
+name = "udp_receive_throughput"
+harness = false
+required-features = ["benchmark"]
 """,
     )
     render(

@@ -625,7 +625,7 @@ impl<D: WeakDeviceIdentifier> MldTimerId<D> {
     }
 
     /// Creates a new [`MldTimerId`] for a GMP delayed report on `device`.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub fn new(device: D) -> Self {
         Self(GmpTimerId { device, _marker: Default::default() })
     }
@@ -766,7 +766,7 @@ fn send_mld_v1_packet<BC: MldBindingsContext, CC: MldSendContext<BC>>(
 /// The counter type `C` is generic to facilitate testing.
 #[derive(Default, Debug)]
 #[cfg_attr(
-    any(test, feature = "testutils"),
+    any(test, feature = "testutils", feature = "benchmark-harness"),
     derive(PartialEq, netstack3_macros::CounterCollection)
 )]
 pub struct MldCounters<C = Counter> {

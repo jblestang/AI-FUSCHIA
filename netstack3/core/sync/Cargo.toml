@@ -11,6 +11,8 @@ name = "netstack3_sync"
 instrumented = ["recursive-lock-panic", "rc-debug-names"]
 recursive-lock-panic = []
 rc-debug-names = []
+single-threaded = []
+benchmark-harness = ["rc-debug-names"]
 testutils = ["instrumented"]
 loom = ["rc-debug-names", "testutils", "dep:loom"]
 

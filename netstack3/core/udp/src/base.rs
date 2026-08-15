@@ -1058,7 +1058,7 @@ impl<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes>
 impl<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> UdpSocketId<I, D, BT> {
     /// Returns the inner state for this socket, sidestepping locking
     /// mechanisms.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub fn state(&self) -> &RwLock<UdpSocketState<I, D, BT>> {
         let Self(rc) = self;
         rc.state()
@@ -1458,6 +1458,257 @@ fn early_demux_ip_packet<
         )
     })
 }
+/// Delivers a parsed datagram to `id` after running ingress filtering.
+fn deliver_udp_datagram<
+    I: IpExt,
+    WireI: IpExt,
+    D: StrongDeviceIdentifier,
+    BC: UdpBindingsContext<I, D>,
+    H: IpHeaderInfo<WireI>,
+>(
+    bindings_ctx: &mut BC,
+    id: &UdpSocketId<I, D::Weak, BC>,
+    device_id: &D,
+    meta: UdpPacketMeta<I>,
+    header_info: &H,
+    packet: &UdpPacket<&[u8]>,
+    state: &UdpSocketState<I, D::Weak, BC>,
+) -> Option<Result<(), ReceiveUdpError>> {
+    if !bindings_ctx.socket_ingress_filter_active() {
+        return Some(bindings_ctx.receive_udp(id, device_id, meta, packet.body()));
+    }
+
+    let [ip_prefix, ip_options] = header_info.as_bytes();
+    let [udp_header, data] = packet.as_bytes();
+    let mut slices = [ip_prefix, ip_options, udp_header, data];
+    let packet_buf = FragmentedByteSlice::new(&mut slices);
+    let header_len = ip_prefix.len() + ip_options.len() + udp_header.len();
+    let filter_result = bindings_ctx.socket_ops_filter().on_ingress(
+        WireI::VERSION,
+        packet_buf,
+        header_len,
+        device_id,
+        id.socket_info(),
+        state.options().marks(),
+    );
+
+    match filter_result {
+        SocketIngressFilterResult::Accept => {
+            Some(bindings_ctx.receive_udp(id, device_id, meta, packet.body()))
+        }
+        SocketIngressFilterResult::Drop => None,
+    }
+}
+
+fn record_delivery<
+    I: IpExt,
+    D: WeakDeviceIdentifier,
+    BC: UdpBindingsTypes,
+    C: UdpCounterContext<I, D, BC>,
+>(
+    core_ctx: &mut C,
+    id: &UdpSocketId<I, D, BC>,
+    delivered: Option<Result<(), ReceiveUdpError>>,
+) -> bool {
+    match delivered {
+        None => false,
+        Some(result) => {
+            core_ctx.increment_both(id, |c| &c.rx_delivered);
+            match result {
+                Ok(()) => {}
+                Err(ReceiveUdpError::QueueFull) => {
+                    core_ctx.increment_both(id, |c| &c.rx_queue_full);
+                }
+            }
+            true
+        }
+    }
+}
+
+/// Fast delivery path for sockets resolved by early demux (connected sockets only).
+fn try_deliver_early_demux<
+    I: IpExt,
+    WireI: IpExt,
+    CC: StateContext<I, BC> + UdpCounterContext<I, CC::WeakDeviceId, BC>,
+    BC: UdpBindingsContext<I, CC::DeviceId>,
+    H: IpHeaderInfo<WireI>,
+>(
+    core_ctx: &mut CC,
+    bindings_ctx: &mut BC,
+    id: &UdpSocketId<I, CC::WeakDeviceId, BC>,
+    device_id: &CC::DeviceId,
+    meta: UdpPacketMeta<I>,
+    header_info: &H,
+    packet: &UdpPacket<&[u8]>,
+) -> bool {
+    let delivered = core_ctx.with_socket_state(id, |core_ctx, state| {
+        let DatagramSocketStateInner::Bound(DatagramBoundSocketState {
+            socket_type: DatagramBoundSocketStateType::Connected(conn_state),
+            original_bound_addr: _,
+        }) = &state.inner
+        else {
+            return None;
+        };
+        let should_deliver = match BoundStateContext::dual_stack_context_mut(core_ctx) {
+            MaybeDualStack::DualStack(dual_stack) => {
+                match dual_stack.ds_converter().convert(conn_state) {
+                    DualStackConnState::ThisStack(state) => state.should_receive(),
+                    DualStackConnState::OtherStack(state) => state.should_receive(),
+                }
+            }
+            MaybeDualStack::NotDualStack(not_dual_stack) => {
+                not_dual_stack.nds_converter().convert(conn_state).should_receive()
+            }
+        };
+        if !should_deliver {
+            return None;
+        }
+        deliver_udp_datagram::<I, WireI, _, _, _>(
+            bindings_ctx,
+            id,
+            device_id,
+            meta,
+            header_info,
+            packet,
+            state,
+        )
+    });
+    record_delivery(core_ctx, id, delivered)
+}
+
+fn deliver_early_demux_socket<
+    I: IpExt,
+    BC: UdpBindingsContext<I, CC::DeviceId> + UdpBindingsContext<I::OtherVersion, CC::DeviceId>,
+    CC: StateContext<I, BC>
+        + StateContext<I::OtherVersion, BC>
+        + UdpCounterContext<I, CC::WeakDeviceId, BC>
+        + UdpCounterContext<I::OtherVersion, CC::WeakDeviceId, BC>,
+    H: IpHeaderInfo<I>,
+>(
+    core_ctx: &mut CC,
+    bindings_ctx: &mut BC,
+    socket: I::DualStackBoundSocketId<CC::WeakDeviceId, Udp<BC>>,
+    device_id: &CC::DeviceId,
+    meta: UdpPacketMeta<I>,
+    header_info: &H,
+    packet: &UdpPacket<&[u8]>,
+) -> bool {
+    #[derive(GenericOverIp)]
+    #[generic_over_ip(I, Ip)]
+    struct Inputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
+        meta: UdpPacketMeta<I>,
+        socket: I::DualStackBoundSocketId<D, Udp<BT>>,
+    }
+
+    struct Outputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
+        meta: UdpPacketMeta<I>,
+        socket: UdpSocketId<I, D, BT>,
+    }
+
+    #[derive(GenericOverIp)]
+    #[generic_over_ip(I, Ip)]
+    enum DualStackOutputs<I: DualStackIpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
+        CurrentStack(Outputs<I, D, BT>),
+        OtherStack(Outputs<I::OtherVersion, D, BT>),
+    }
+
+    let dual_stack_outputs = I::map_ip(
+        Inputs { meta, socket },
+        |Inputs { meta, socket }| match socket {
+            EitherIpSocket::V4(id) => {
+                DualStackOutputs::CurrentStack(Outputs { meta, socket: id })
+            }
+            EitherIpSocket::V6(id) => {
+                DualStackOutputs::OtherStack(Outputs { meta: meta.to_ipv6_mapped(), socket: id })
+            }
+        },
+        |Inputs { meta, socket }| DualStackOutputs::CurrentStack(Outputs { meta, socket }),
+    );
+
+    match dual_stack_outputs {
+        DualStackOutputs::CurrentStack(Outputs { meta, socket }) => try_deliver_early_demux(
+            core_ctx,
+            bindings_ctx,
+            &socket,
+            device_id,
+            meta,
+            header_info,
+            packet,
+        ),
+        DualStackOutputs::OtherStack(Outputs { meta, socket }) => try_deliver_early_demux(
+            core_ctx,
+            bindings_ctx,
+            &socket,
+            device_id,
+            meta,
+            header_info,
+            packet,
+        ),
+    }
+}
+
+fn receive_ip_packet_early_demux<
+    I: IpExt,
+    B: BufferMut,
+    H: IpHeaderInfo<I>,
+    BC: UdpBindingsContext<I, CC::DeviceId> + UdpBindingsContext<I::OtherVersion, CC::DeviceId>,
+    CC: StateContext<I, BC>
+        + StateContext<I::OtherVersion, BC>
+        + UdpCounterContext<I, CC::WeakDeviceId, BC>
+        + UdpCounterContext<I::OtherVersion, CC::WeakDeviceId, BC>,
+>(
+    core_ctx: &mut CC,
+    bindings_ctx: &mut BC,
+    device: &CC::DeviceId,
+    src_ip: I::Addr,
+    dst_ip: SpecifiedAddr<I::Addr>,
+    mut buffer: B,
+    header_info: &H,
+    parsing_context: &mut NetworkParsingContext,
+    early_demux_socket: I::DualStackBoundSocketId<CC::WeakDeviceId, Udp<BC>>,
+) -> Result<(), (B, I::IcmpError)> {
+    let Ok(packet) = buffer.parse_with::<_, UdpPacket<_>>(UdpParseArgs::with_context(
+        src_ip,
+        dst_ip.get(),
+        parsing_context,
+    )) else {
+        CounterContext::<UdpCountersWithoutSocket<I>>::counters(core_ctx).rx_malformed.increment();
+        return Ok(());
+    };
+
+    let meta = UdpPacketMeta {
+        src_ip,
+        src_port: packet.src_port(),
+        dst_ip: dst_ip.get(),
+        dst_port: packet.dst_port(),
+        dscp_and_ecn: header_info.dscp_and_ecn(),
+    };
+
+    let was_delivered = deliver_early_demux_socket::<I, _, _, _>(
+        core_ctx,
+        bindings_ctx,
+        early_demux_socket,
+        device,
+        meta,
+        header_info,
+        &packet,
+    );
+
+    if was_delivered {
+        Ok(())
+    } else {
+        let parse_meta =
+            ParsablePacket::<_, UdpParseArgs<I::Addr, &mut NetworkParsingContext>>::parse_metadata(
+                &packet,
+            );
+        buffer.undo_parse(parse_meta);
+        CounterContext::<UdpCountersWithoutSocket<I>>::counters(core_ctx)
+            .rx_unknown_dest_port
+            .increment();
+        Err((buffer, I::IcmpError::port_unreachable()))
+    }
+}
+
 fn receive_ip_packet<
     I: IpExt,
     B: BufferMut,
@@ -1481,9 +1732,24 @@ fn receive_ip_packet<
     let ReceiveIpPacketMeta { broadcast, transparent_override, parsing_context } = meta;
 
     trace_duration!("udp::receive_ip_packet");
-    CounterContext::<UdpCountersWithoutSocket<I>>::counters(core_ctx).rx.increment();
     trace!("received UDP packet: {:x?}", buffer.as_mut());
     let src_ip: I::Addr = src_ip.into_addr();
+
+    if early_demux_socket.is_some() && transparent_override.is_none() {
+        return receive_ip_packet_early_demux(
+            core_ctx,
+            bindings_ctx,
+            device,
+            src_ip,
+            dst_ip,
+            buffer,
+            header_info,
+            parsing_context,
+            early_demux_socket.expect("checked is_some above"),
+        );
+    }
+
+    CounterContext::<UdpCountersWithoutSocket<I>>::counters(core_ctx).rx.increment();
 
     let Ok(packet) = buffer.parse_with::<_, UdpPacket<_>>(UdpParseArgs::with_context(
         src_ip,
@@ -1656,41 +1922,18 @@ fn try_deliver<
             return None;
         }
 
-        let [ip_prefix, ip_options] = header_info.as_bytes();
-        let [udp_header, data] = packet.as_bytes();
-        let mut slices = [ip_prefix, ip_options, udp_header, data];
-        let packet_buf = FragmentedByteSlice::new(&mut slices);
-        let header_len = ip_prefix.len() + ip_options.len() + udp_header.len();
-        let filter_result = bindings_ctx.socket_ops_filter().on_ingress(
-            WireI::VERSION,
-            packet_buf,
-            header_len,
+        deliver_udp_datagram::<I, WireI, _, _, _>(
+            bindings_ctx,
+            id,
             device_id,
-            id.socket_info(),
-            state.options().marks(),
-        );
-
-        match filter_result {
-            SocketIngressFilterResult::Accept => {
-                Some(bindings_ctx.receive_udp(id, device_id, meta, packet.body()))
-            }
-            SocketIngressFilterResult::Drop => None,
-        }
+            meta,
+            header_info,
+            &packet,
+            state,
+        )
     });
 
-    match delivered {
-        None => false,
-        Some(result) => {
-            core_ctx.increment_both(id, |c| &c.rx_delivered);
-            match result {
-                Ok(()) => {}
-                Err(ReceiveUdpError::QueueFull) => {
-                    core_ctx.increment_both(id, |c| &c.rx_queue_full);
-                }
-            }
-            true
-        }
-    }
+    record_delivery(core_ctx, id, delivered)
 }
 
 /// A wrapper for [`try_deliver`] that supports dual stack delivery.
@@ -2682,7 +2925,7 @@ where
     }
 
     /// Returns the currently available send buffer space on the socket.
-    #[cfg(any(test, feature = "testutils"))]
+    #[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
     pub fn send_buffer_available(&mut self, id: &UdpApiSocketId<I, C>) -> usize {
         self.datagram().send_buffer_available(id)
     }
@@ -3110,7 +3353,7 @@ impl<
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "benchmark"))]
 pub(crate) mod testutils {
     use alloc::borrow::ToOwned;
     use alloc::vec;
@@ -3330,13 +3573,22 @@ pub(crate) mod testutils {
             meta: UdpPacketMeta<I>,
             body: &[u8],
         ) -> Result<(), ReceiveUdpError> {
-            let SocketReceived { packets, max_size } =
-                self.state.received_mut::<I>().entry(id.downgrade()).or_default();
-            if packets.len() < *max_size {
-                packets.push(ReceivedPacket { meta, body: body.to_owned() });
-                Ok(())
-            } else {
-                Err(ReceiveUdpError::QueueFull)
+            // Benchmarks measure stack receive throughput, not bindings queue behavior.
+            #[cfg(feature = "benchmark")]
+            {
+                let _ = (id, meta, body);
+                return Ok(());
+            }
+            #[cfg(not(feature = "benchmark"))]
+            {
+                let SocketReceived { packets, max_size } =
+                    self.state.received_mut::<I>().entry(id.downgrade()).or_default();
+                if packets.len() < *max_size {
+                    packets.push(ReceivedPacket { meta, body: body.to_owned() });
+                    Ok(())
+                } else {
+                    Err(ReceiveUdpError::QueueFull)
+                }
             }
         }
 

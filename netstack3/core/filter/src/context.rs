@@ -170,9 +170,17 @@ pub trait SocketOpsFilter<D> {
 pub trait SocketOpsFilterBindingContext<D>: TxMetadataBindingsTypes {
     /// Returns the filter that should be called for socket ops.
     fn socket_ops_filter(&self) -> impl SocketOpsFilter<D>;
+
+    /// Returns whether [`SocketOpsFilter::on_ingress`] may drop packets.
+    ///
+    /// When `false`, the stack may skip ingress filter scaffolding on hot paths
+    /// (e.g. early-demux connected delivery).
+    fn socket_ingress_filter_active(&self) -> bool {
+        true
+    }
 }
 
-#[cfg(any(test, feature = "testutils"))]
+#[cfg(any(test, feature = "testutils", feature = "benchmark-harness"))]
 impl<
     TimerId: Debug + PartialEq + Clone + Send + Sync + 'static,
     Event: Debug + 'static,
@@ -184,6 +192,10 @@ impl<
 {
     fn socket_ops_filter(&self) -> impl SocketOpsFilter<D> {
         crate::testutil::NoOpSocketOpsFilter
+    }
+
+    fn socket_ingress_filter_active(&self) -> bool {
+        false
     }
 }
 
