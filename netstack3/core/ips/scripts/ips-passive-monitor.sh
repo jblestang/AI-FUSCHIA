@@ -84,7 +84,7 @@ echo "Live traffic on other interfaces is not modified by this tool."
 
 cd "${REPO_ROOT}"
 
-cargo build -p netstack3-ips --features testutils --example passive_capture --release
+cargo build -p netstack3-ips --example passive_capture --release
 
 if [[ "${BUILD_ONLY}" -eq 1 ]]; then
   echo "Build complete (--build-only)."

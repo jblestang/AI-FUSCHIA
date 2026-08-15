@@ -14,7 +14,7 @@
 //! sudo ./netstack3/core/ips/scripts/ips-passive-monitor.sh eth1
 //!
 //! # Or run the binary directly:
-//! sudo cargo run -p netstack3-ips --features testutils --example passive_capture -- --interface eth1
+//! sudo cargo run -p netstack3-ips --example passive_capture -- --interface eth1
 //! ```
 
 #[cfg(not(target_os = "linux"))]
@@ -32,12 +32,59 @@ mod linux {
         bind, c_int, c_void, close, if_nametoindex, recvfrom, setsockopt, signal, socket, AF_PACKET,
         ETH_P_ALL, PACKET_ADD_MEMBERSHIP, PACKET_MR_PROMISC, SIGINT, SIGTERM, SOCK_RAW, SOL_PACKET,
     };
-    use netstack3_base::testutil::FakeDeviceId;
+    use netstack3_base::{DeviceIdentifier, StrongDeviceIdentifier, WeakDeviceIdentifier};
     use netstack3_ips::{
         IpsReceiveBindingsContext, IpsReceiveError, IpsState, ReceivedTcpSegmentView,
         ReceivedUdpDatagramView, process_ethernet_frame,
     };
     use packet::Buf;
+
+    /// Standalone capture NIC identifier (no `testutils` feature required).
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+    struct CaptureDeviceId;
+
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+    struct CaptureWeakDeviceId;
+
+    impl DeviceIdentifier for CaptureDeviceId {
+        fn is_loopback(&self) -> bool {
+            false
+        }
+    }
+
+    impl DeviceIdentifier for CaptureWeakDeviceId {
+        fn is_loopback(&self) -> bool {
+            false
+        }
+    }
+
+    impl StrongDeviceIdentifier for CaptureDeviceId {
+        type Weak = CaptureWeakDeviceId;
+
+        fn downgrade(&self) -> CaptureWeakDeviceId {
+            CaptureWeakDeviceId
+        }
+    }
+
+    impl WeakDeviceIdentifier for CaptureWeakDeviceId {
+        type Strong = CaptureDeviceId;
+
+        fn upgrade(&self) -> Option<CaptureDeviceId> {
+            Some(CaptureDeviceId)
+        }
+    }
+
+    impl PartialEq<CaptureWeakDeviceId> for CaptureDeviceId {
+        fn eq(&self, _other: &CaptureWeakDeviceId) -> bool {
+            true
+        }
+    }
+
+    impl PartialEq<CaptureDeviceId> for CaptureWeakDeviceId {
+        fn eq(&self, _other: &CaptureDeviceId) -> bool {
+            true
+        }
+    }
 
     #[repr(C)]
     struct SockAddrLl {
@@ -116,10 +163,10 @@ mod linux {
         }
     }
 
-    impl IpsReceiveBindingsContext<FakeDeviceId> for FlowAnalyzer {
+    impl IpsReceiveBindingsContext<CaptureDeviceId> for FlowAnalyzer {
         fn receive_udp_datagram(
             &mut self,
-            _device_id: &FakeDeviceId,
+            _device_id: &CaptureDeviceId,
             view: ReceivedUdpDatagramView,
         ) -> Result<(), IpsReceiveError> {
             self.stats.udp_delivered += 1;
@@ -129,7 +176,7 @@ mod linux {
 
         fn receive_tcp_segment(
             &mut self,
-            _device_id: &FakeDeviceId,
+            _device_id: &CaptureDeviceId,
             view: ReceivedTcpSegmentView,
         ) -> Result<(), IpsReceiveError> {
             self.stats.tcp_delivered += 1;
@@ -250,7 +297,7 @@ mod linux {
         }
 
         let fd = open_passive_socket(&interface, promisc)?;
-        let device_id = FakeDeviceId;
+        let device_id = CaptureDeviceId;
         let state = IpsState::new();
         let mut handler = FlowAnalyzer { stats: CaptureStats::default(), verbose };
 

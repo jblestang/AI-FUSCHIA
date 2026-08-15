@@ -35,7 +35,7 @@ sudo ./netstack3/core/ips/scripts/ips-passive-monitor.sh eth1 --build-only
 ## Manual run
 
 ```bash
-sudo cargo run -p netstack3-ips --features testutils --example passive_capture -- \
+sudo cargo run -p netstack3-ips --example passive_capture -- \
   --interface eth1 --verbose
 ```
 
