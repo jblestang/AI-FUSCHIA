@@ -27,6 +27,7 @@ mod internal {
     pub(super) mod counters;
     pub(super) mod device;
     pub(super) mod fragmentation;
+    pub(super) mod fragment_chain;
     pub(super) mod gmp;
     pub(super) mod icmp;
     pub(super) mod ipv6;

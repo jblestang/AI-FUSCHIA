@@ -19,6 +19,7 @@ diagnostics_traits = { package = "diagnostics-traits", path = "../../../libs/dia
 either = { workspace = true }
 explicit = { path = "../../../libs/explicit" }
 hmac = { workspace = true }
+internet_checksum = { path = "../../../libs/internet-checksum" }
 lock_order = { package = "lock-order", path = "../lock-order" }
 log = { workspace = true }
 lru-cache = { workspace = true }

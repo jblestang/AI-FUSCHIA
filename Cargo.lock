@@ -684,6 +684,7 @@ dependencies = [
  "either",
  "explicit",
  "hmac",
+ "internet_checksum",
  "lock-order",
  "log",
  "lru-cache",
