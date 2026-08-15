@@ -631,7 +631,7 @@ sequenceDiagram
     participant S as Server
 
     C->>IPS: SEQ=1000, 80B payload
-    Note over IPS: keep 0..40, drop tail<br/>delta_c2s += 40
+    Note over IPS: keep_len=40, drop tail<br/>delta_c2s += 40
     IPS->>S: SEQ=1000, 40B payload
 
     S->>IPS: ACK=1080 (raw, pre-mangle)
