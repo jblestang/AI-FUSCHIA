@@ -510,6 +510,480 @@ impl<'a> TcpPayloadSliceView<'a> {
     }
 }
 
+/// Minimum ICMP/ICMPv6 header length (type, code, checksum) per RFC 792 / RFC 4443.
+pub const ICMP_HEADER_PREFIX_LEN: usize = 4;
+
+/// Parsed ICMP header fields and their location within a stored frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IcmpHeaderView {
+    /// ICMP message type.
+    pub msg_type: u8,
+    /// ICMP message code.
+    pub code: u8,
+    /// Index into [`ReceivedIcmpMessageView::eth_frames`].
+    pub eth_frame_index: usize,
+    /// Byte range of the 4-byte ICMP header prefix within the frame buffer.
+    pub header_range: Range<usize>,
+}
+
+/// Zero-copy view of a received ICMP message for IPS analysis.
+pub struct ReceivedIcmpMessageView {
+    frames: EthFrameStore,
+    ip_fragments: Vec<IpFragmentInfo>,
+    fragment_metadata: IpFragmentMetadata,
+    ethernet_header: Option<EthernetHeaderView>,
+    icmp_header: Option<IcmpHeaderView>,
+    payload_parts: Vec<PayloadPart>,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+}
+
+impl ReceivedIcmpMessageView {
+    pub(crate) fn new(
+        eth_frames: Vec<Buf<Vec<u8>>>,
+        ip_fragments: Vec<IpFragmentInfo>,
+        fragment_metadata: IpFragmentMetadata,
+        icmp_header: Option<IcmpHeaderView>,
+        payload_parts: Vec<(usize, Range<usize>)>,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+    ) -> Self {
+        let ethernet_header = ethernet_header_for_frames(&eth_frames, &ip_fragments);
+        Self {
+            frames: EthFrameStore::from_frames(eth_frames),
+            ip_fragments,
+            fragment_metadata,
+            ethernet_header,
+            icmp_header,
+            payload_parts: payload_parts
+                .into_iter()
+                .map(|(eth_frame_index, range)| PayloadPart { eth_frame_index, range })
+                .collect(),
+            src_ip,
+            dst_ip,
+        }
+    }
+
+    /// Source and destination IP addresses.
+    pub fn addrs(&self) -> (IpAddr, IpAddr) {
+        (self.src_ip, self.dst_ip)
+    }
+
+    /// Metadata describing IP fragment reception, including RFC 5722 events.
+    pub fn ip_fragment_metadata(&self) -> &IpFragmentMetadata {
+        &self.fragment_metadata
+    }
+
+    /// Parsed IP fragment information, one entry per received fragment.
+    pub fn ip_fragments(&self) -> &[IpFragmentInfo] {
+        &self.ip_fragments
+    }
+
+    /// Underlying Ethernet frame buffers.
+    pub fn eth_frames(&self) -> impl Iterator<Item = &[u8]> + '_ {
+        self.frames.eth_frames()
+    }
+
+    /// Parsed Ethernet header from the first IP fragment's backing frame.
+    pub fn ethernet_header(&self) -> Option<&EthernetHeaderView> {
+        self.ethernet_header.as_ref()
+    }
+
+    /// Parsed ICMP header prefix (type, code, checksum).
+    pub fn icmp_header(&self) -> Option<&IcmpHeaderView> {
+        self.icmp_header.as_ref()
+    }
+
+    /// ICMP message body after the 4-byte header prefix (zero-copy).
+    pub fn payload_slices(&self) -> IcmpPayloadSliceView<'_> {
+        IcmpPayloadSliceView { view: self }
+    }
+
+    pub fn src_ipv4(&self) -> Option<Ipv4Addr> {
+        match self.src_ip {
+            IpAddr::V4(v4) => Some(v4),
+            IpAddr::V6(_) => None,
+        }
+    }
+
+    pub fn src_ipv6(&self) -> Option<Ipv6Addr> {
+        match self.src_ip {
+            IpAddr::V6(v6) => Some(v6),
+            IpAddr::V4(_) => None,
+        }
+    }
+}
+
+/// Iovec-style read-only ICMP body view (bytes after the 4-octet header prefix).
+pub struct IcmpPayloadSliceView<'a> {
+    view: &'a ReceivedIcmpMessageView,
+}
+
+impl<'a> IcmpPayloadSliceView<'a> {
+    /// Number of payload slices.
+    pub fn len(&self) -> usize {
+        self.view.payload_parts.len()
+    }
+
+    /// Returns true if there are no payload slices.
+    pub fn is_empty(&self) -> bool {
+        self.view.payload_parts.is_empty()
+    }
+
+    /// Iterates payload slices in order.
+    pub fn iter(&self) -> impl Iterator<Item = &'a [u8]> + 'a {
+        self.view.payload_parts.iter().map(|part| {
+            &self.view.frames.frames()[part.eth_frame_index].as_ref()[part.range.clone()]
+        })
+    }
+}
+
+/// Minimum IGMP header prefix length (type, max resp code, checksum) per RFC 3376.
+pub const IGMP_HEADER_PREFIX_LEN: usize = 4;
+
+/// Parsed IGMP header fields and their location within a stored frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgmpHeaderView {
+    /// IGMP message type (e.g. 0x22 = IGMPv3 Membership Report).
+    pub msg_type: u8,
+    /// Max Response Code field (meaningful for queries; zero in reports).
+    pub max_resp_code: u8,
+    /// Index into [`ReceivedIgmpMessageView::eth_frames`].
+    pub eth_frame_index: usize,
+    /// Byte range of the 4-byte IGMP header prefix within the frame buffer.
+    pub header_range: Range<usize>,
+}
+
+/// Zero-copy view of a received IGMP message for IPS analysis.
+pub struct ReceivedIgmpMessageView {
+    frames: EthFrameStore,
+    ip_fragments: Vec<IpFragmentInfo>,
+    fragment_metadata: IpFragmentMetadata,
+    ethernet_header: Option<EthernetHeaderView>,
+    igmp_header: Option<IgmpHeaderView>,
+    payload_parts: Vec<PayloadPart>,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+}
+
+impl ReceivedIgmpMessageView {
+    pub(crate) fn new(
+        eth_frames: Vec<Buf<Vec<u8>>>,
+        ip_fragments: Vec<IpFragmentInfo>,
+        fragment_metadata: IpFragmentMetadata,
+        igmp_header: Option<IgmpHeaderView>,
+        payload_parts: Vec<(usize, Range<usize>)>,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+    ) -> Self {
+        let ethernet_header = ethernet_header_for_frames(&eth_frames, &ip_fragments);
+        Self {
+            frames: EthFrameStore::from_frames(eth_frames),
+            ip_fragments,
+            fragment_metadata,
+            ethernet_header,
+            igmp_header,
+            payload_parts: payload_parts
+                .into_iter()
+                .map(|(eth_frame_index, range)| PayloadPart { eth_frame_index, range })
+                .collect(),
+            src_ip,
+            dst_ip,
+        }
+    }
+
+    /// Source and destination IP addresses.
+    pub fn addrs(&self) -> (IpAddr, IpAddr) {
+        (self.src_ip, self.dst_ip)
+    }
+
+    pub fn ip_fragment_metadata(&self) -> &IpFragmentMetadata {
+        &self.fragment_metadata
+    }
+
+    pub fn ip_fragments(&self) -> &[IpFragmentInfo] {
+        &self.ip_fragments
+    }
+
+    pub fn eth_frames(&self) -> impl Iterator<Item = &[u8]> + '_ {
+        self.frames.eth_frames()
+    }
+
+    pub fn ethernet_header(&self) -> Option<&EthernetHeaderView> {
+        self.ethernet_header.as_ref()
+    }
+
+    /// Parsed IGMP header prefix (type, max resp code, checksum).
+    pub fn igmp_header(&self) -> Option<&IgmpHeaderView> {
+        self.igmp_header.as_ref()
+    }
+
+    /// IGMP message body after the 4-byte header prefix (zero-copy).
+    pub fn payload_slices(&self) -> IgmpPayloadSliceView<'_> {
+        IgmpPayloadSliceView { view: self }
+    }
+
+    pub fn src_ipv4(&self) -> Option<Ipv4Addr> {
+        match self.src_ip {
+            IpAddr::V4(v4) => Some(v4),
+            IpAddr::V6(_) => None,
+        }
+    }
+}
+
+/// Iovec-style read-only IGMP body view (bytes after the 4-octet header prefix).
+pub struct IgmpPayloadSliceView<'a> {
+    view: &'a ReceivedIgmpMessageView,
+}
+
+impl<'a> IgmpPayloadSliceView<'a> {
+    pub fn len(&self) -> usize {
+        self.view.payload_parts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.view.payload_parts.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &'a [u8]> + 'a {
+        self.view.payload_parts.iter().map(|part| {
+            &self.view.frames.frames()[part.eth_frame_index].as_ref()[part.range.clone()]
+        })
+    }
+}
+
+/// Minimum PIM header prefix length (ver/type, reserved, checksum) per RFC 7761.
+pub const PIM_HEADER_PREFIX_LEN: usize = 4;
+
+/// Parsed PIM header fields and their location within a stored frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PimHeaderView {
+    /// PIM version (upper 4 bits of the first octet).
+    pub version: u8,
+    /// PIM message type (lower 4 bits of the first octet).
+    pub msg_type: u8,
+    /// Index into [`ReceivedPimMessageView::eth_frames`].
+    pub eth_frame_index: usize,
+    /// Byte range of the 4-byte PIM header prefix within the frame buffer.
+    pub header_range: Range<usize>,
+}
+
+/// Zero-copy view of a received PIM message for IPS analysis.
+pub struct ReceivedPimMessageView {
+    frames: EthFrameStore,
+    ip_fragments: Vec<IpFragmentInfo>,
+    fragment_metadata: IpFragmentMetadata,
+    ethernet_header: Option<EthernetHeaderView>,
+    pim_header: Option<PimHeaderView>,
+    payload_parts: Vec<PayloadPart>,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+}
+
+impl ReceivedPimMessageView {
+    pub(crate) fn new(
+        eth_frames: Vec<Buf<Vec<u8>>>,
+        ip_fragments: Vec<IpFragmentInfo>,
+        fragment_metadata: IpFragmentMetadata,
+        pim_header: Option<PimHeaderView>,
+        payload_parts: Vec<(usize, Range<usize>)>,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+    ) -> Self {
+        let ethernet_header = ethernet_header_for_frames(&eth_frames, &ip_fragments);
+        Self {
+            frames: EthFrameStore::from_frames(eth_frames),
+            ip_fragments,
+            fragment_metadata,
+            ethernet_header,
+            pim_header,
+            payload_parts: payload_parts
+                .into_iter()
+                .map(|(eth_frame_index, range)| PayloadPart { eth_frame_index, range })
+                .collect(),
+            src_ip,
+            dst_ip,
+        }
+    }
+
+    /// Source and destination IP addresses.
+    pub fn addrs(&self) -> (IpAddr, IpAddr) {
+        (self.src_ip, self.dst_ip)
+    }
+
+    pub fn ip_fragment_metadata(&self) -> &IpFragmentMetadata {
+        &self.fragment_metadata
+    }
+
+    pub fn ip_fragments(&self) -> &[IpFragmentInfo] {
+        &self.ip_fragments
+    }
+
+    pub fn eth_frames(&self) -> impl Iterator<Item = &[u8]> + '_ {
+        self.frames.eth_frames()
+    }
+
+    pub fn ethernet_header(&self) -> Option<&EthernetHeaderView> {
+        self.ethernet_header.as_ref()
+    }
+
+    /// Parsed PIM header prefix (version, type, checksum).
+    pub fn pim_header(&self) -> Option<&PimHeaderView> {
+        self.pim_header.as_ref()
+    }
+
+    /// PIM message body after the 4-byte header prefix (zero-copy).
+    pub fn payload_slices(&self) -> PimPayloadSliceView<'_> {
+        PimPayloadSliceView { view: self }
+    }
+}
+
+/// Iovec-style read-only PIM body view (bytes after the 4-octet header prefix).
+pub struct PimPayloadSliceView<'a> {
+    view: &'a ReceivedPimMessageView,
+}
+
+impl<'a> PimPayloadSliceView<'a> {
+    pub fn len(&self) -> usize {
+        self.view.payload_parts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.view.payload_parts.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &'a [u8]> + 'a {
+        self.view.payload_parts.iter().map(|part| {
+            &self.view.frames.frames()[part.eth_frame_index].as_ref()[part.range.clone()]
+        })
+    }
+}
+
+/// IPsec protocol carried in an IPv4 next-header value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpsecProtocol {
+    /// Encapsulating Security Payload (IPv4 protocol 50).
+    Esp,
+    /// Authentication Header (IPv4 protocol 51).
+    Ah,
+}
+
+/// Minimum ESP header prefix length (SPI + sequence number) per RFC 4303.
+pub const ESP_HEADER_PREFIX_LEN: usize = 8;
+
+/// Minimum AH fixed header prefix length (through sequence number) per RFC 4302.
+pub const AH_HEADER_PREFIX_LEN: usize = 12;
+
+/// Parsed IPsec header fields and their location within a stored frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IpsecHeaderView {
+    /// ESP or AH.
+    pub protocol: IpsecProtocol,
+    /// Security Parameters Index.
+    pub spi: u32,
+    /// Sequence number field.
+    pub sequence_number: u32,
+    /// AH next header (present for AH only).
+    pub next_header: Option<u8>,
+    /// AH payload length field in 32-bit words minus 2 (present for AH only).
+    pub ah_payload_length: Option<u8>,
+    /// Index into [`ReceivedIpsecMessageView::eth_frames`].
+    pub eth_frame_index: usize,
+    /// Byte range of the parsed IPsec header prefix within the frame buffer.
+    pub header_range: Range<usize>,
+}
+
+/// Zero-copy view of a received IPsec (ESP or AH) message for IPS analysis.
+pub struct ReceivedIpsecMessageView {
+    frames: EthFrameStore,
+    ip_fragments: Vec<IpFragmentInfo>,
+    fragment_metadata: IpFragmentMetadata,
+    ethernet_header: Option<EthernetHeaderView>,
+    ipsec_header: Option<IpsecHeaderView>,
+    payload_parts: Vec<PayloadPart>,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+}
+
+impl ReceivedIpsecMessageView {
+    pub(crate) fn new(
+        eth_frames: Vec<Buf<Vec<u8>>>,
+        ip_fragments: Vec<IpFragmentInfo>,
+        fragment_metadata: IpFragmentMetadata,
+        ipsec_header: Option<IpsecHeaderView>,
+        payload_parts: Vec<(usize, Range<usize>)>,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+    ) -> Self {
+        let ethernet_header = ethernet_header_for_frames(&eth_frames, &ip_fragments);
+        Self {
+            frames: EthFrameStore::from_frames(eth_frames),
+            ip_fragments,
+            fragment_metadata,
+            ethernet_header,
+            ipsec_header,
+            payload_parts: payload_parts
+                .into_iter()
+                .map(|(eth_frame_index, range)| PayloadPart { eth_frame_index, range })
+                .collect(),
+            src_ip,
+            dst_ip,
+        }
+    }
+
+    /// Source and destination IP addresses.
+    pub fn addrs(&self) -> (IpAddr, IpAddr) {
+        (self.src_ip, self.dst_ip)
+    }
+
+    pub fn ip_fragment_metadata(&self) -> &IpFragmentMetadata {
+        &self.fragment_metadata
+    }
+
+    pub fn ip_fragments(&self) -> &[IpFragmentInfo] {
+        &self.ip_fragments
+    }
+
+    pub fn eth_frames(&self) -> impl Iterator<Item = &[u8]> + '_ {
+        self.frames.eth_frames()
+    }
+
+    pub fn ethernet_header(&self) -> Option<&EthernetHeaderView> {
+        self.ethernet_header.as_ref()
+    }
+
+    /// Parsed ESP or AH header prefix.
+    pub fn ipsec_header(&self) -> Option<&IpsecHeaderView> {
+        self.ipsec_header.as_ref()
+    }
+
+    /// IPsec body after the parsed header prefix (zero-copy).
+    pub fn payload_slices(&self) -> IpsecPayloadSliceView<'_> {
+        IpsecPayloadSliceView { view: self }
+    }
+}
+
+/// Iovec-style read-only IPsec body view (bytes after the header prefix).
+pub struct IpsecPayloadSliceView<'a> {
+    view: &'a ReceivedIpsecMessageView,
+}
+
+impl<'a> IpsecPayloadSliceView<'a> {
+    pub fn len(&self) -> usize {
+        self.view.payload_parts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.view.payload_parts.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &'a [u8]> + 'a {
+        self.view.payload_parts.iter().map(|part| {
+            &self.view.frames.frames()[part.eth_frame_index].as_ref()[part.range.clone()]
+        })
+    }
+}
+
 /// Parses an untagged Ethernet header from frame bytes; returns None if too short.
 pub(crate) fn parse_ethernet_header(
     frame: &[u8],
@@ -603,6 +1077,129 @@ pub(crate) fn parse_tcp_header(
         window: segment.window_size(),
         eth_frame_index,
         header_range: tcp_start..tcp_start + header_len,
+    })
+}
+
+/// Parses an ICMP header prefix from frame bytes; returns None if too short.
+pub(crate) fn parse_icmp_header(
+    frame: &[u8],
+    eth_frame_index: usize,
+    icmp_start: usize,
+) -> Option<IcmpHeaderView> {
+    let header_range = icmp_start..icmp_start + ICMP_HEADER_PREFIX_LEN;
+    if frame.len() < header_range.end {
+        return None;
+    }
+    Some(IcmpHeaderView {
+        msg_type: frame[icmp_start],
+        code: frame[icmp_start + 1],
+        eth_frame_index,
+        header_range,
+    })
+}
+
+/// Parses an IGMP header prefix from frame bytes; returns None if too short.
+pub(crate) fn parse_igmp_header(
+    frame: &[u8],
+    eth_frame_index: usize,
+    igmp_start: usize,
+) -> Option<IgmpHeaderView> {
+    let header_range = igmp_start..igmp_start + IGMP_HEADER_PREFIX_LEN;
+    if frame.len() < header_range.end {
+        return None;
+    }
+    Some(IgmpHeaderView {
+        msg_type: frame[igmp_start],
+        max_resp_code: frame[igmp_start + 1],
+        eth_frame_index,
+        header_range,
+    })
+}
+
+/// Parses a PIM header prefix from frame bytes; returns None if too short.
+pub(crate) fn parse_pim_header(
+    frame: &[u8],
+    eth_frame_index: usize,
+    pim_start: usize,
+) -> Option<PimHeaderView> {
+    let header_range = pim_start..pim_start + PIM_HEADER_PREFIX_LEN;
+    if frame.len() < header_range.end {
+        return None;
+    }
+    let ver_type = frame[pim_start];
+    Some(PimHeaderView {
+        version: ver_type >> 4,
+        msg_type: ver_type & 0x0F,
+        eth_frame_index,
+        header_range,
+    })
+}
+
+/// Parses an ESP header prefix from frame bytes; returns None if too short.
+pub(crate) fn parse_esp_header(
+    frame: &[u8],
+    eth_frame_index: usize,
+    esp_start: usize,
+) -> Option<IpsecHeaderView> {
+    let header_range = esp_start..esp_start + ESP_HEADER_PREFIX_LEN;
+    if frame.len() < header_range.end {
+        return None;
+    }
+    let spi = u32::from_be_bytes([
+        frame[esp_start],
+        frame[esp_start + 1],
+        frame[esp_start + 2],
+        frame[esp_start + 3],
+    ]);
+    let sequence_number = u32::from_be_bytes([
+        frame[esp_start + 4],
+        frame[esp_start + 5],
+        frame[esp_start + 6],
+        frame[esp_start + 7],
+    ]);
+    Some(IpsecHeaderView {
+        protocol: IpsecProtocol::Esp,
+        spi,
+        sequence_number,
+        next_header: None,
+        ah_payload_length: None,
+        eth_frame_index,
+        header_range,
+    })
+}
+
+/// Parses an AH header prefix from frame bytes; returns None if too short.
+pub(crate) fn parse_ah_header(
+    frame: &[u8],
+    eth_frame_index: usize,
+    ah_start: usize,
+) -> Option<IpsecHeaderView> {
+    let header_range = ah_start..ah_start + AH_HEADER_PREFIX_LEN;
+    if frame.len() < header_range.end {
+        return None;
+    }
+    let next_header = frame[ah_start];
+    let ah_payload_length = frame[ah_start + 1];
+    let spi = u32::from_be_bytes([
+        frame[ah_start + 4],
+        frame[ah_start + 5],
+        frame[ah_start + 6],
+        frame[ah_start + 7],
+    ]);
+    let sequence_number = u32::from_be_bytes([
+        frame[ah_start + 8],
+        frame[ah_start + 9],
+        frame[ah_start + 10],
+        frame[ah_start + 11],
+    ]);
+    Some(IpsecHeaderView {
+        protocol: IpsecProtocol::Ah,
+        spi,
+        sequence_number,
+        next_header: Some(next_header),
+        ah_payload_length: Some(ah_payload_length),
+        eth_frame_index,
+        header_range,
     })
 }
 

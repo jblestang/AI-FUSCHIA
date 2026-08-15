@@ -11,7 +11,10 @@ use alloc::vec::Vec;
 use netstack3_base::StrongDeviceIdentifier;
 use packet::{Buffer as _, BufferMut, GrowBuffer as _};
 
-use crate::view::{ReceivedTcpSegmentView, ReceivedUdpDatagramView};
+use crate::view::{
+    ReceivedIcmpMessageView, ReceivedIgmpMessageView, ReceivedIpsecMessageView,
+    ReceivedPimMessageView, ReceivedTcpSegmentView, ReceivedUdpDatagramView,
+};
 
 /// Errors encountered when delivering to Layer 7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +37,34 @@ pub trait IpsReceiveBindingsContext<D: StrongDeviceIdentifier> {
         &mut self,
         device_id: &D,
         view: ReceivedTcpSegmentView,
+    ) -> Result<(), IpsReceiveError>;
+
+    /// Delivers an ICMP or ICMPv6 message view.
+    fn receive_icmp_message(
+        &mut self,
+        device_id: &D,
+        view: ReceivedIcmpMessageView,
+    ) -> Result<(), IpsReceiveError>;
+
+    /// Delivers an IGMP (IPv4 multicast) message view.
+    fn receive_igmp_message(
+        &mut self,
+        device_id: &D,
+        view: ReceivedIgmpMessageView,
+    ) -> Result<(), IpsReceiveError>;
+
+    /// Delivers a PIM (IPv4 multicast routing) message view.
+    fn receive_pim_message(
+        &mut self,
+        device_id: &D,
+        view: ReceivedPimMessageView,
+    ) -> Result<(), IpsReceiveError>;
+
+    /// Delivers an IPsec ESP or AH message view.
+    fn receive_ipsec_message(
+        &mut self,
+        device_id: &D,
+        view: ReceivedIpsecMessageView,
     ) -> Result<(), IpsReceiveError>;
 }
 

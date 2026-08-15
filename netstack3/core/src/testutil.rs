@@ -1417,8 +1417,37 @@ impl IpsReceiveBindingsContext<DeviceId<Self>> for FakeBindingsCtx {
         let _ = view;
         Ok(())
     }
-}
+        fn receive_icmp_message(
+            &mut self,
+            _device_id: &DeviceId<Self>,
+            _view: netstack3_ips::ReceivedIcmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
 
+        fn receive_igmp_message(
+            &mut self,
+            _device_id: &DeviceId<Self>,
+            _view: netstack3_ips::ReceivedIgmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }}
+
+        fn receive_pim_message(
+            &mut self,
+            _device_id: &DeviceId<Self>,
+            _view: netstack3_ips::ReceivedPimMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
+
+        fn receive_ipsec_message(
+            &mut self,
+            _device_id: &DeviceId<Self>,
+            _view: netstack3_ips::ReceivedIpsecMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
 impl UdpBindingsTypes for FakeBindingsCtx {
     type ExternalData<I: Ip> = ();
     type SocketWritableListener = FakeSocketWritableListener;

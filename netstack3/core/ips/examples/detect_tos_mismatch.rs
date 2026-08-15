@@ -57,7 +57,37 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for ExampleIpsHandler {
     ) -> Result<(), IpsReceiveError> {
         Ok(())
     }
-}
+        fn receive_icmp_message(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            _view: netstack3_ips::ReceivedIcmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
+
+        fn receive_igmp_message(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            _view: netstack3_ips::ReceivedIgmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        
+        fn receive_pim_message(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            _view: netstack3_ips::ReceivedPimMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
+
+        fn receive_ipsec_message(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            _view: netstack3_ips::ReceivedIpsecMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
+    }
 
 fn build_ipv4_udp_fragment(
     fragment_offset: FragmentOffset,

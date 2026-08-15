@@ -17,6 +17,7 @@ extern crate alloc;
 mod context;
 mod frame_store;
 mod fragment;
+mod ingress_diagnose;
 mod overwrite;
 mod receive;
 mod state;
@@ -40,7 +41,10 @@ pub use context::{
     TryIntoIpsFrame,
 };
 pub use overwrite::{UdpOverwriteChecksum, UdpOverwriteError, UdpOverwriter};
-pub use receive::process_ethernet_frame;
+pub use ingress_diagnose::{
+    diagnose_ingress_rejection, IngressRejectionDiagnosis, IngressRejectionStage,
+};
+pub use receive::{ingress_accepts_without_l7, process_ethernet_frame};
 pub use state::IpsState;
 pub use tcp_flow::{
     InboundSegmentClass, IpsTcpFlowTable, IpsTcpFlowTableConfig, TcpEditRecord, TcpFlowDirection,
@@ -50,7 +54,9 @@ pub use tcp_overwrite::{
     TcpForwardAction, TcpOverwriteChecksum, TcpOverwriteError, TcpOverwriter, TcpPayloadEdit,
 };
 pub use view::{
-    EthernetHeaderView, FragmentEvent, IpFragmentMetadata, IpFragmentInfo, PayloadSliceView,
-    ReceivedTcpSegmentView, ReceivedUdpDatagramView, ReassemblyOutcome, TcpHeaderView,
-    UdpHeaderView,
+    EthernetHeaderView, FragmentEvent, IgmpHeaderView, IcmpHeaderView, IpFragmentMetadata,
+    IpFragmentInfo, IpsecHeaderView, IpsecProtocol, PayloadSliceView, PimHeaderView,
+    ReceivedIcmpMessageView, ReceivedIgmpMessageView, ReceivedIpsecMessageView,
+    ReceivedPimMessageView, ReceivedTcpSegmentView, ReceivedUdpDatagramView, ReassemblyOutcome,
+    TcpHeaderView, UdpHeaderView,
 };

@@ -65,5 +65,7 @@ harness = false
 required-features = ["benchmark"]
 
 [[example]]
-name = "profile_ips_receive"
-required-features = ["benchmark"]
+name = "passive_capture"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
