@@ -1,0 +1,25 @@
+[package]
+name = "netstack3-ips"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "netstack3_ips"
+
+[features]
+testutils = ["instrumented"]
+instrumented = []
+
+[dependencies]
+assert_matches = { workspace = true }
+log = { workspace = true }
+net_types = { package = "net-types", path = "../../../libs/net-types" }
+netstack3_base = { package = "netstack3-base", path = "../base" }
+netstack3_hashmap = { package = "netstack3-hashmap", path = "../hashmap" }
+packet = { path = "../../../libs/packet" }
+packet_formats = { package = "packet_formats", path = "../../../libs/packet-formats" }
+zerocopy = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+netstack3_base = { package = "netstack3-base", path = "../base", features = ["testutils"] }

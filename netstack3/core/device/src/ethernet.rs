@@ -503,20 +503,23 @@ impl DeviceReceiveFrameSpec for EthernetLinkDevice {
     type FrameMetadata<D> = RecvEthernetFrameMeta<D>;
 }
 
-impl<CC, BC> ReceivableFrameMeta<CC, BC> for RecvEthernetFrameMeta<CC::DeviceId>
+impl<CC, BC, D> ReceivableFrameMeta<CC, BC> for RecvEthernetFrameMeta<D>
 where
     BC: EthernetIpLinkDeviceBindingsContext,
-    CC: EthernetIpLinkDeviceDynamicStateContext<BC>
-        + RecvFrameContext<RecvIpFrameMeta<CC::DeviceId, DeviceIpLayerMetadata<BC>, Ipv4>, BC>
-        + RecvFrameContext<RecvIpFrameMeta<CC::DeviceId, DeviceIpLayerMetadata<BC>, Ipv6>, BC>
+    CC: DeviceIdContext<EthernetLinkDevice, DeviceId = D>
+        + EthernetIpLinkDeviceDynamicStateContext<BC>
+        + RecvFrameContext<RecvIpFrameMeta<D, DeviceIpLayerMetadata<BC>, Ipv4>, BC>
+        + RecvFrameContext<RecvIpFrameMeta<D, DeviceIpLayerMetadata<BC>, Ipv6>, BC>
         + ArpPacketHandler<EthernetLinkDevice, BC>
         + DeviceSocketHandler<EthernetLinkDevice, BC>
-        + ResourceCounterContext<CC::DeviceId, DeviceCounters>
-        + ResourceCounterContext<CC::DeviceId, EthernetDeviceCounters>
-        + ResourceCounterContext<CC::DeviceId, IpCounters<Ipv4>>
-        + ResourceCounterContext<CC::DeviceId, IpCounters<Ipv6>>,
+        + ResourceCounterContext<D, DeviceCounters>
+        + ResourceCounterContext<D, EthernetDeviceCounters>
+        + ResourceCounterContext<D, IpCounters<Ipv4>>
+        + ResourceCounterContext<D, IpCounters<Ipv6>>
+        + super::ips_ingress::IpsRxFrameHandler<BC, DeviceId = D>,
+    D: Debug,
 {
-    fn receive_meta<B: BufferMut + Debug>(
+    fn receive_meta<B: BufferMut + Debug + netstack3_base::IpsRxFrameBuffer>(
         self,
         core_ctx: &mut CC,
         bindings_ctx: &mut BC,
@@ -537,6 +540,18 @@ where
         // Ethernet frame. If this becomes insufficient in the future, we may want
         // to consider making this behavior configurable (at compile time, at
         // runtime on a global basis, or at runtime on a per-device basis).
+        // IPS zero-copy ingress: attempt before Ethernet parse when supported.
+        buffer = match super::ips_ingress::try_ips_ingress_before_parse(
+            core_ctx,
+            bindings_ctx,
+            &device_id,
+            buffer,
+        ) {
+            super::ips_ingress::IpsPreParseResult::NotApplicable(b) => b,
+            super::ips_ingress::IpsPreParseResult::Consumed => return,
+            super::ips_ingress::IpsPreParseResult::Continue(b) => b,
+        };
+
         let (ethernet, whole_frame) = if let Ok(frame) =
             buffer.parse_with_view::<_, EthernetFrame<_>>(EthernetFrameLengthCheck::NoCheck)
         {

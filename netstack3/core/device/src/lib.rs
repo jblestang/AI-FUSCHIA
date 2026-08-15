@@ -27,6 +27,7 @@ mod internal {
     pub(super) mod ethernet;
     pub(super) mod gro;
     pub(super) mod id;
+    pub(super) mod ips_ingress;
     pub(super) mod loopback;
     pub(super) mod pure_ip;
     pub(super) mod queue;
@@ -129,6 +130,9 @@ pub use internal::config::{
 };
 pub use internal::gro::{GroInputItem, GroIter, GroOutputItem, MaybeContiguousBuffer};
 pub use internal::id::{BaseDeviceId, DeviceId, DeviceProvider, WeakDeviceId};
+pub use internal::ips_ingress::{
+    IpsPreParseResult, IpsRxFrameHandler, try_ips_ingress_before_parse,
+};
 pub use internal::state::{
     DeviceStateSpec, DeviceTxOffloadSpecContext, IpLinkDeviceState, IpLinkDeviceStateInner,
 };

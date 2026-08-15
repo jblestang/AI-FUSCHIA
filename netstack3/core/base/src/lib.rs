@@ -66,6 +66,7 @@ pub use event::EventContext;
 pub use frame::{
     CoreTxMetadataContext, FrameDestination, LocalFrameDestination, NeverBuffer,
     ReceivableFrameMeta, RecvFrameContext, RecvIpFrameMeta, SendFrameContext, SendFrameError,
+    IpsRxFrameBuffer,
     SendFrameErrorReason, SendableFrameMeta, TxMetadata, TxMetadataBindingsTypes,
 };
 pub use inspect::{Inspectable, InspectableValue, Inspector, InspectorDeviceExt, InspectorExt};

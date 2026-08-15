@@ -10,12 +10,45 @@ use net_types::{BroadcastAddr, MulticastAddr};
 
 use core::convert::Infallible as Never;
 use core::fmt::Debug;
-use packet::{BufferMut, SerializeError};
+
+use alloc::vec::Vec;
+use packet::{Buf, BufferMut, FragmentedBuffer as _, GrowBuffer as _, SerializeError};
 use thiserror::Error;
 
 use crate::error::ErrorAndSerializer;
 use crate::socket::SocketInfo;
 use crate::{ChecksumOffloadResult, NetworkParsingContext, NetworkSerializer};
+
+/// Optional zero-copy conversion of an RX buffer for IPS ingress.
+///
+/// Buffer types that support IPS ingress override these methods. The default
+/// implementation declines IPS processing so normal receive paths are unchanged.
+pub trait IpsRxFrameBuffer: BufferMut + Sized {
+    /// Returns the full Ethernet frame when IPS zero-copy ingress is supported.
+    fn into_ips_rx_frame(self, whole_frame_len: usize) -> Result<Buf<Vec<u8>>, Self> {
+        let _ = whole_frame_len;
+        Err(self)
+    }
+
+    /// Restores an RX buffer after IPS returns a frame unhandled.
+    fn from_ips_rx_frame(_frame: Buf<Vec<u8>>) -> Self {
+        unreachable!("IPS RX restore requires into_ips_rx_frame support")
+    }
+}
+
+impl IpsRxFrameBuffer for Buf<Vec<u8>> {
+    fn into_ips_rx_frame(mut self, whole_frame_len: usize) -> Result<Buf<Vec<u8>>, Self> {
+        let consumed = whole_frame_len.saturating_sub(self.len());
+        self.grow_front(consumed);
+        Ok(self)
+    }
+
+    fn from_ips_rx_frame(frame: Buf<Vec<u8>>) -> Self {
+        frame
+    }
+}
+
+impl IpsRxFrameBuffer for Buf<&mut [u8]> {}
 
 /// A context for receiving frames.
 ///
@@ -26,7 +59,7 @@ pub trait RecvFrameContext<Meta, BC> {
     /// Receive a frame.
     ///
     /// `receive_frame` receives a frame with the given metadata.
-    fn receive_frame<B: BufferMut + Debug>(
+    fn receive_frame<B: BufferMut + Debug + IpsRxFrameBuffer>(
         &mut self,
         bindings_ctx: &mut BC,
         metadata: Meta,
@@ -35,7 +68,7 @@ pub trait RecvFrameContext<Meta, BC> {
 }
 
 impl<CC, BC> ReceivableFrameMeta<CC, BC> for Never {
-    fn receive_meta<B: BufferMut + Debug>(
+    fn receive_meta<B: BufferMut + Debug + IpsRxFrameBuffer>(
         self,
         _core_ctx: &mut CC,
         _bindings_ctx: &mut BC,
@@ -54,14 +87,14 @@ impl<CC, BC> ReceivableFrameMeta<CC, BC> for Never {
 /// trait implementations, while [`RecvFrameContext`] is used for trait bounds.
 pub trait ReceivableFrameMeta<CC, BC> {
     /// Receives this frame using the provided contexts.
-    fn receive_meta<B: BufferMut + Debug>(self, core_ctx: &mut CC, bindings_ctx: &mut BC, frame: B);
+    fn receive_meta<B: BufferMut + Debug + IpsRxFrameBuffer>(self, core_ctx: &mut CC, bindings_ctx: &mut BC, frame: B);
 }
 
 impl<CC, BC, Meta> RecvFrameContext<Meta, BC> for CC
 where
     Meta: ReceivableFrameMeta<CC, BC>,
 {
-    fn receive_frame<B: BufferMut + Debug>(
+    fn receive_frame<B: BufferMut + Debug + IpsRxFrameBuffer>(
         &mut self,
         bindings_ctx: &mut BC,
         metadata: Meta,

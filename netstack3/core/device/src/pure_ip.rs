@@ -201,7 +201,7 @@ where
         + DeviceSocketHandler<PureIpDevice, BC>,
     BC: TxMetadataBindingsTypes,
 {
-    fn receive_meta<B: BufferMut + Debug>(
+    fn receive_meta<B: BufferMut + Debug + netstack3_base::IpsRxFrameBuffer>(
         self,
         core_ctx: &mut CC,
         bindings_ctx: &mut BC,

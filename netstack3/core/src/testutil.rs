@@ -86,6 +86,7 @@ use netstack3_tcp::{
 use netstack3_udp::{
     ReceiveUdpError, UdpBindingsTypes, UdpPacketMeta, UdpReceiveBindingsContext, UdpSocketId,
 };
+use netstack3_ips::{IpsReceiveBindingsContext, IpsReceiveError, ReceivedUdpDatagramView};
 use packet::{Buf, BufferMut};
 use zerocopy::SplitByteSlice;
 
@@ -1395,6 +1396,17 @@ impl<I: IpExt> UdpReceiveBindingsContext<I, DeviceId<Self>> for FakeBindingsCtx 
         _id: &UdpSocketId<I, WeakDeviceId<Self>, FakeBindingsCtx>,
         _err: PendingDatagramSocketError,
     ) {
+    }
+}
+
+impl IpsReceiveBindingsContext<DeviceId<Self>> for FakeBindingsCtx {
+    fn receive_udp_datagram(
+        &mut self,
+        _device_id: &DeviceId<Self>,
+        view: ReceivedUdpDatagramView,
+    ) -> Result<(), IpsReceiveError> {
+        let _ = view;
+        Ok(())
     }
 }
 

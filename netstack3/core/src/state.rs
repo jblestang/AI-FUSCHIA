@@ -9,6 +9,7 @@ use netstack3_base::{BuildableCoreContext, ContextProvider, CoreTimerContext, Ct
 use netstack3_device::{DeviceId, DeviceLayerState};
 use netstack3_ip::icmp::IcmpState;
 use netstack3_ip::{self as ip, IpLayerIpExt, IpLayerTimerId, IpStateInner, Ipv4State, Ipv6State};
+use netstack3_ips::IpsState;
 
 use crate::api::CoreApi;
 use crate::time::TimerId;
@@ -46,6 +47,7 @@ impl StackStateBuilder {
             ipv4: self.ipv4.build::<StackState<BC>, _, _>(bindings_ctx),
             ipv6: self.ipv6.build::<StackState<BC>, _, _>(bindings_ctx),
             device: Default::default(),
+            ips: Default::default(),
         }
     }
 }
@@ -63,6 +65,7 @@ pub struct StackState<BT: BindingsTypes> {
     pub(crate) ipv4: Ipv4State<DeviceId<BT>, BT>,
     pub(crate) ipv6: Ipv6State<DeviceId<BT>, BT>,
     pub(crate) device: DeviceLayerState<BT>,
+    pub(crate) ips: IpsState,
 }
 
 impl<BT: BindingsTypes> StackState<BT> {
