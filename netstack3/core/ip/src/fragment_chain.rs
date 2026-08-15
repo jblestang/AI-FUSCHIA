@@ -27,8 +27,27 @@ impl PacketSegment {
     }
 
     /// Views `subslice` within already-shared `storage`.
+    ///
+    /// Returns `None` when `subslice` does not lie wholly inside `storage` (e.g. after
+    /// copy-on-write split between the arc and the live packet buffer).
+    pub fn view_of_subslice(storage: Arc<[u8]>, subslice: &[u8]) -> Option<Self> {
+        let base = storage.as_ptr() as usize;
+        let limit = base.saturating_add(storage.len());
+        let start = subslice.as_ptr() as usize;
+        let end = start.saturating_add(subslice.len());
+        (start >= base && end <= limit).then(|| {
+            let offset = start - base;
+            Self { storage, range: offset..offset + subslice.len() }
+        })
+    }
+
+    /// Views `subslice` within already-shared `storage`.
     pub fn view_in(storage: Arc<[u8]>, range: Range<usize>) -> Self {
-        debug_assert!(range.end <= storage.len());
+        debug_assert!(
+            range.start <= range.end && range.end <= storage.len(),
+            "PacketSegment range {range:?} out of bounds for storage len {}",
+            storage.len()
+        );
         Self { storage, range }
     }
 
@@ -270,5 +289,13 @@ mod tests {
         };
         let buf = ReassembledChainBuffer::new(chain);
         assert_eq!(buf.len(), 25);
+    }
+
+    #[test]
+    fn view_of_subslice_rejects_out_of_storage_pointer() {
+        let storage = Arc::from([1u8, 2, 3, 4]);
+        let foreign = [9u8; 2];
+        assert!(PacketSegment::view_of_subslice(storage.clone(), &foreign).is_none());
+        assert!(PacketSegment::view_of_subslice(storage, &[]).is_some());
     }
 }

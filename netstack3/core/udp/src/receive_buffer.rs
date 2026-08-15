@@ -38,9 +38,13 @@ impl UdpReceiveBuffer {
         transport_range: Range<usize>,
         parse_meta: ParseMetadata,
     ) -> Self {
-        let start = transport_range.start + parse_meta.header_len();
-        let end = start + parse_meta.body_len();
-        Self::view(PacketSegment::view_in(storage, start..end))
+        let start = transport_range.start.saturating_add(parse_meta.header_len());
+        let end = start.saturating_add(parse_meta.body_len());
+        if start <= end && end <= storage.len() {
+            Self::view(PacketSegment::view_in(storage, start..end))
+        } else {
+            Self::view(PacketSegment::capture(&[]))
+        }
     }
 
     /// Placeholder for `bench-receive` (no storage touched).

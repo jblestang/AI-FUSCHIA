@@ -1166,17 +1166,12 @@ fn udp_payload_view(
 ) -> UdpReceiveBuffer {
     let payload = packet.body();
     if let Some(frame) = frame_storage {
-        let start = payload.as_ptr() as usize - frame.as_ptr() as usize;
-        let end = start + payload.len();
-        if end <= frame.len() {
-            return UdpReceiveBuffer::view(netstack3_ip::PacketSegment::view_in(
-                frame.clone(),
-                start..end,
-            ));
+        if let Some(segment) = netstack3_ip::PacketSegment::view_of_subslice(frame.clone(), payload)
+        {
+            return UdpReceiveBuffer::view(segment);
         }
     }
-    // Fallback when storage was split by copy-on-write (e.g. extra Arc clones before
-    // header mutation). One capture at delivery; fan-out still shares the view.
+    // Storage mismatch (e.g. copy-on-write split): one capture at delivery; fan-out shares the view.
     UdpReceiveBuffer::view(netstack3_ip::PacketSegment::capture(payload))
 }
 
@@ -5555,10 +5550,7 @@ mod tests {
                 SocketReceived {
                     packets: vec![ReceivedPacket {
                         meta,
-                        body: UdpReceiveBuffer::view(netstack3_ip::PacketSegment::view_in(
-                            alloc::sync::Arc::from([]),
-                            0..0,
-                        )),
+                        body: UdpReceiveBuffer::from(&body[..]),
                     }],
                     max_size: usize::MAX
                 }
