@@ -8,7 +8,13 @@ license.workspace = true
 name = "netstack3_udp"
 
 [features]
-testutils = ["instrumented"]
+testutils = [
+    "instrumented",
+    "netstack3_base/testutils",
+    "netstack3_ip/testutils",
+    "netstack3_filter/testutils",
+    "netstack3_datagram/testutils",
+]
 instrumented = []
 single-stack = []
 # No-op bindings receive path for throughput measurement (bench builds only).
@@ -44,4 +50,9 @@ smallvec = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+assert_matches = { workspace = true }
+ip-test-macro = { package = "ip-test-macro", path = "../../../libs/ip-test-macro" }
+itertools = "0.14"
+net_declare = { package = "net-declare", path = "../../../libs/net-declare" }
 netstack3_macros = { package = "netstack3-macros", path = "../macros" }
+test-case = "3.3"

@@ -1158,6 +1158,17 @@ impl UdpPacketMeta<Ipv4> {
     }
 }
 
+use crate::internal::receive_buffer::UdpReceiveBuffer;
+
+/// A datagram dequeued from a socket receive queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UdpRecvDatagram<I: Ip> {
+    /// Source/destination metadata for the datagram.
+    pub meta: UdpPacketMeta<I>,
+    /// Payload bytes (shared, zero-copy on fan-out).
+    pub payload: UdpReceiveBuffer,
+}
+
 /// Errors that Bindings may encounter when receiving a UDP datagram.
 pub enum ReceiveUdpError {
     /// The socket's receive queue is full and can't hold the datagram.
@@ -1172,8 +1183,20 @@ pub trait UdpReceiveBindingsContext<I: IpExt, D: StrongDeviceIdentifier>: UdpBin
         id: &UdpSocketId<I, D::Weak, Self>,
         device_id: &D,
         meta: UdpPacketMeta<I>,
-        body: &[u8],
+        body: UdpReceiveBuffer,
     ) -> Result<(), ReceiveUdpError>;
+
+    /// Dequeues the next received datagram, if any.
+    ///
+    /// Bindings that buffer datagrams for userspace must implement this.
+    /// The default returns `None`.
+    fn try_recv_udp(
+        &mut self,
+        id: &UdpSocketId<I, D::Weak, Self>,
+    ) -> Option<UdpRecvDatagram<I>> {
+        let _ = id;
+        None
+    }
 
     /// Notifies Bindings that an error was set on a socket.
     fn on_socket_error(
@@ -1472,10 +1495,11 @@ fn deliver_udp_datagram<
     meta: UdpPacketMeta<I>,
     header_info: &H,
     packet: &UdpPacket<&[u8]>,
+    body: UdpReceiveBuffer,
     state: &UdpSocketState<I, D::Weak, BC>,
 ) -> Option<Result<(), ReceiveUdpError>> {
     if !bindings_ctx.socket_ingress_filter_active() {
-        return Some(bindings_ctx.receive_udp(id, device_id, meta, packet.body()));
+        return Some(bindings_ctx.receive_udp(id, device_id, meta, body));
     }
 
     let [ip_prefix, ip_options] = header_info.as_bytes();
@@ -1494,7 +1518,7 @@ fn deliver_udp_datagram<
 
     match filter_result {
         SocketIngressFilterResult::Accept => {
-            Some(bindings_ctx.receive_udp(id, device_id, meta, packet.body()))
+            Some(bindings_ctx.receive_udp(id, device_id, meta, body))
         }
         SocketIngressFilterResult::Drop => None,
     }
@@ -1586,6 +1610,7 @@ fn try_deliver_early_demux<
     meta: UdpPacketMeta<I>,
     header_info: &H,
     packet: &UdpPacket<&[u8]>,
+    body: UdpReceiveBuffer,
 ) -> bool {
     let delivered = core_ctx.with_socket_state(id, |core_ctx, state| {
         let DatagramSocketStateInner::Bound(DatagramBoundSocketState {
@@ -1605,6 +1630,7 @@ fn try_deliver_early_demux<
             meta,
             header_info,
             packet,
+            body,
             state,
         )
     });
@@ -1627,6 +1653,7 @@ fn deliver_early_demux_socket<
     meta: UdpPacketMeta<I>,
     header_info: &H,
     packet: &UdpPacket<&[u8]>,
+    body: UdpReceiveBuffer,
 ) -> bool {
     #[cfg(feature = "single-stack")]
     {
@@ -1671,6 +1698,7 @@ fn deliver_early_demux_socket<
                 meta,
                 header_info,
                 packet,
+                body,
             ),
             DualStackOutputs::OtherStack(_) => false,
         }
@@ -1718,6 +1746,7 @@ fn deliver_early_demux_socket<
                 meta,
                 header_info,
                 packet,
+                body,
             ),
             DualStackOutputs::OtherStack(Outputs { meta, socket }) => try_deliver_early_demux(
                 core_ctx,
@@ -1727,6 +1756,7 @@ fn deliver_early_demux_socket<
                 meta,
                 header_info,
                 packet,
+                body,
             ),
         }
     }
@@ -1761,6 +1791,8 @@ fn receive_ip_packet_early_demux<
         return Ok(());
     };
 
+    CounterContext::<UdpCountersWithoutSocket<I>>::counters(core_ctx).rx.increment();
+
     let meta = UdpPacketMeta {
         src_ip,
         src_port: packet.src_port(),
@@ -1769,6 +1801,7 @@ fn receive_ip_packet_early_demux<
         dscp_and_ecn: header_info.dscp_and_ecn(),
     };
 
+    let body = UdpReceiveBuffer::from_slice(packet.body());
     let was_delivered = deliver_early_demux_socket::<I, _, _, _>(
         core_ctx,
         bindings_ctx,
@@ -1777,6 +1810,7 @@ fn receive_ip_packet_early_demux<
         meta,
         header_info,
         &packet,
+        body,
     );
 
     if was_delivered {
@@ -1931,6 +1965,7 @@ fn receive_ip_packet<
         dst_port,
         dscp_and_ecn: header_info.dscp_and_ecn(),
     };
+    let body = UdpReceiveBuffer::from_slice(packet.body());
     let was_delivered = recipients.into_iter().fold(false, |was_delivered, lookup_result| {
         let delivered = try_dual_stack_deliver::<I, BC, CC, H>(
             core_ctx,
@@ -1940,7 +1975,8 @@ fn receive_ip_packet<
             &meta,
             require_transparent,
             header_info,
-            packet.clone(),
+            &packet,
+            body.share(),
         );
         was_delivered | delivered
     });
@@ -1971,7 +2007,8 @@ fn try_deliver<
     meta: UdpPacketMeta<I>,
     require_transparent: bool,
     header_info: &H,
-    packet: UdpPacket<&[u8]>,
+    packet: &UdpPacket<&[u8]>,
+    body: UdpReceiveBuffer,
 ) -> bool {
     let delivered = core_ctx.with_socket_state(&id, |core_ctx, state| {
         let should_deliver = match &state.inner {
@@ -2003,7 +2040,8 @@ fn try_deliver<
             device_id,
             meta,
             header_info,
-            &packet,
+            packet,
+            body,
             state,
         )
     });
@@ -2028,7 +2066,8 @@ fn try_dual_stack_deliver<
     meta: &UdpPacketMeta<I>,
     require_transparent: bool,
     header_info: &H,
-    packet: UdpPacket<&[u8]>,
+    packet: &UdpPacket<&[u8]>,
+    body: UdpReceiveBuffer,
 ) -> bool {
     #[cfg(feature = "single-stack")]
     {
@@ -2076,6 +2115,7 @@ fn try_dual_stack_deliver<
                 require_transparent,
                 header_info,
                 packet,
+                body,
             ),
             DualStackOutputs::OtherStack(_) => false,
         }
@@ -2126,6 +2166,7 @@ fn try_dual_stack_deliver<
                 require_transparent,
                 header_info,
                 packet,
+                body.share(),
             ),
             DualStackOutputs::OtherStack(Outputs { meta, socket }) => try_deliver(
                 core_ctx,
@@ -2136,6 +2177,7 @@ fn try_dual_stack_deliver<
                 require_transparent,
                 header_info,
                 packet,
+                body.share(),
             ),
         }
     }
@@ -3249,6 +3291,26 @@ where
         self.datagram().collect_all_sockets()
     }
 
+    /// Dequeues the next received datagram without copying the payload.
+    ///
+    /// Returns `None` when the socket receive queue is empty. Bindings must
+    /// implement [`UdpReceiveBindingsContext::try_recv_udp`].
+    pub fn try_recv(
+        &mut self,
+        id: &UdpApiSocketId<I, C>,
+    ) -> Option<UdpRecvDatagram<I>> {
+        let (_, bindings_ctx) = self.contexts();
+        bindings_ctx.try_recv_udp(id)
+    }
+
+    /// Dequeues the next received datagram, returning metadata and payload separately.
+    pub fn try_recv_from(
+        &mut self,
+        id: &UdpApiSocketId<I, C>,
+    ) -> Option<(UdpPacketMeta<I>, UdpReceiveBuffer)> {
+        self.try_recv(id).map(|datagram| (datagram.meta, datagram.payload))
+    }
+
     /// Provides inspect data for UDP sockets.
     pub fn inspect<N>(&mut self, inspector: &mut N)
     where
@@ -3512,7 +3574,7 @@ pub(crate) mod testutils {
     #[derive(Debug, PartialEq)]
     pub(crate) struct ReceivedPacket<I: Ip> {
         pub(crate) meta: UdpPacketMeta<I>,
-        pub(crate) body: Vec<u8>,
+        pub(crate) body: UdpReceiveBuffer,
     }
 
     impl<D: FakeStrongDeviceId> FakeUdpCoreCtx<D> {
@@ -3684,7 +3746,7 @@ pub(crate) mod testutils {
                 .map(|(id, SocketReceived { packets, .. })| {
                     (
                         id.clone(),
-                        packets.iter().map(|ReceivedPacket { meta: _, body }| &body[..]).collect(),
+                        packets.iter().map(|ReceivedPacket { meta: _, body }| body.as_slice()).collect(),
                     )
                 })
                 .collect()
@@ -3699,7 +3761,7 @@ pub(crate) mod testutils {
             id: &UdpSocketId<I, D::Weak, Self>,
             _device_id: &D,
             meta: UdpPacketMeta<I>,
-            body: &[u8],
+            body: UdpReceiveBuffer,
         ) -> Result<(), ReceiveUdpError> {
             // Throughput benchmarks measure stack receive, not bindings queue behavior.
             #[cfg(feature = "bench-receive")]
@@ -3712,12 +3774,24 @@ pub(crate) mod testutils {
                 let SocketReceived { packets, max_size } =
                     self.state.received_mut::<I>().entry(id.downgrade()).or_default();
                 if packets.len() < *max_size {
-                    packets.push(ReceivedPacket { meta, body: body.to_owned() });
+                    packets.push(ReceivedPacket { meta, body });
                     Ok(())
                 } else {
                     Err(ReceiveUdpError::QueueFull)
                 }
             }
+        }
+
+        fn try_recv_udp(
+            &mut self,
+            id: &UdpSocketId<I, D::Weak, Self>,
+        ) -> Option<UdpRecvDatagram<I>> {
+            let SocketReceived { packets, max_size: _ } =
+                self.state.received_mut::<I>().entry(id.downgrade()).or_default();
+            packets.drain(..1).next().map(|ReceivedPacket { meta, body }| UdpRecvDatagram {
+                meta,
+                payload: body,
+            })
         }
 
         fn on_socket_error(
@@ -5452,7 +5526,7 @@ mod tests {
             &HashMap::from([(
                 listener.downgrade(),
                 SocketReceived {
-                    packets: vec![ReceivedPacket { meta, body: vec![] }],
+                    packets: vec![ReceivedPacket { meta, body: UdpReceiveBuffer::from(&[][..]) }],
                     max_size: usize::MAX
                 }
             )])

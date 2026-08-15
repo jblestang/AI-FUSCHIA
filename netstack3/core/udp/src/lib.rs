@@ -21,6 +21,7 @@ mod internal {
     pub(super) mod base;
     pub(super) mod counters;
     pub(super) mod diagnostics;
+    pub(super) mod receive_buffer;
     pub(super) mod settings;
 }
 
@@ -32,9 +33,11 @@ pub use internal::base::{
     BoundSockets, BoundStateContext, DualStackBoundStateContext, DualStackUdpSocketId,
     NonDualStackBoundStateContext, ReceiveUdpError, SendError, SendToError, Sockets, StateContext,
     UdpApi, UdpBindingsContext, UdpBindingsTypes, UdpIpTransportContext, UdpPacketMeta,
-    UdpReceiveBindingsContext, UdpRemotePort, UdpSocketId, UdpSocketSet, UdpSocketState,
-    UdpSocketTxMetadata, UdpState, UdpStateContext, UseUdpIpTransportContextBlanket,
+    UdpReceiveBindingsContext, UdpRecvDatagram, UdpRemotePort, UdpSocketId, UdpSocketSet,
+    UdpSocketState, UdpSocketTxMetadata, UdpState, UdpStateContext, UseUdpIpTransportContextBlanket,
 };
+
+pub use internal::receive_buffer::UdpReceiveBuffer;
 
 pub use internal::diagnostics::{UdpSocketDiagnosticTuple, UdpSocketDiagnostics};
 

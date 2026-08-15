@@ -16,7 +16,9 @@ cargo bench -p netstack3-benchmarks --bench udp_receive_throughput
 
 Each `/bytes` iteration processes one second of traffic at the **1.00 Gbps harness target** (~119 MiB wire bytes). Each `/per-packet` iteration receives one datagram.
 
-Bench builds enable `bench-receive` (no-op bindings delivery) so the measurement covers **stack receive only**, not fake-bindings queue allocation. Without `bench-receive`, per-packet cost includes `body.to_owned()` and HashMap push (~+70 ns @ 64 B).
+Bench builds enable `bench-receive` (no-op bindings delivery) so the measurement covers **stack receive only**, not fake-bindings queue allocation. Without `bench-receive`, per-packet cost includes bindings queue work (~+35 ns @ 64 B on typical fake bindings).
+
+Production bindings should use [`UdpReceiveBuffer`](../../core/udp/src/receive_buffer.rs) (Arc-backed payload) and [`UdpApi::try_recv`](../../core/udp/src/base.rs) to dequeue without copying bytes again.
 
 ### Stack ceiling (64 B payload, best observed)
 
