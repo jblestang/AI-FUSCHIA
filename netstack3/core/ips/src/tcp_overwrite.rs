@@ -4,9 +4,9 @@
 
 //! In-place TCP prefix-keep edits with sequence/ACK mangling.
 //!
-//! v1 scope: **established-flow data segments only** — segments carrying SYN, FIN,
-//! or RST are rejected by [`TcpOverwriter::apply_edit`]. Control flags are still
-//! observed on the [`TcpOverwriter::prepare_inbound`] path for flow teardown.
+//! v1 scope: **established-flow data only** — [`TcpOverwriter::apply_edit`] rejects
+//! SYN/FIN/RST. SACK block edges are rewritten using reverse-direction stream state;
+//! URG is cleared when the urgent pointer falls outside the kept payload prefix.
 
 use internet_checksum::Checksum;
 use net_types::ip::{IpAddr, Ipv4Addr};
@@ -22,7 +22,9 @@ const IPV4_HDR_CHECKSUM_OFFSET: usize = 10;
 const TCP_SEQ_OFFSET: usize = 4;
 const TCP_ACK_OFFSET: usize = 8;
 const TCP_FLAGS_OFFSET: usize = 13;
+const TCP_URG_OFFSET: usize = 18;
 const TCP_CHECKSUM_OFFSET: usize = 16;
+const TCP_FLAG_URG: u8 = 0x20;
 const TCP_OPTION_KIND_NOP: u8 = 1;
 const TCP_OPTION_KIND_SACK_PERMITTED: u8 = 4;
 const TCP_OPTION_KIND_SACK: u8 = 5;
@@ -168,6 +170,7 @@ impl<'a> TcpOverwriter<'a> {
         let (_, ack) =
             self.flow.translate_outbound(self.direction, raw_seq, raw_ack, ack_flag);
         let frame_index = tcp_hdr.eth_frame_index;
+        let wire_payload_len = self.view.payload_len();
         let buf = self
             .view
             .eth_frame_buf_mut(frame_index)
@@ -181,8 +184,15 @@ impl<'a> TcpOverwriter<'a> {
                     .copy_from_slice(&a.to_be_bytes());
             }
         }
+        adjust_urg_pointer(buf, tcp_start, wire_payload_len);
         if self.flow.has_mangling() || removing_from_this_segment > 0 {
-            strip_sack_options(buf, tcp_start, tcp_hdr.data_offset_bytes as usize);
+            rewrite_sack_options(
+                buf,
+                tcp_start,
+                tcp_hdr.data_offset_bytes as usize,
+                self.flow,
+                self.direction,
+            );
         }
         self.refresh_lengths_and_checksums(frame_index, tcp_start)?;
         Ok(())
@@ -358,9 +368,35 @@ fn compute_ipv4_header_checksum(header_prefix: &[u8]) -> [u8; 2] {
     checksum.checksum()
 }
 
-/// Replaces SACK-related TCP options with NOPs so seq references cannot disagree
-/// with mangled stream state. Header length is preserved.
-fn strip_sack_options(buf: &mut [u8], tcp_start: usize, data_offset: usize) {
+/// Clears URG when the urgent pointer targets bytes removed by prefix-keep truncation.
+///
+/// The urgent pointer is **segment-relative** (offset from seq); it is not shifted when
+/// only seq/ack are mangled. After payload truncation, clear URG if the pointer is
+/// at or beyond the kept payload length.
+fn adjust_urg_pointer(buf: &mut [u8], tcp_start: usize, payload_len: usize) {
+    let flags = buf[tcp_start + TCP_FLAGS_OFFSET];
+    if flags & TCP_FLAG_URG == 0 {
+        return;
+    }
+    let urg_ptr = u16::from_be_bytes([
+        buf[tcp_start + TCP_URG_OFFSET],
+        buf[tcp_start + TCP_URG_OFFSET + 1],
+    ]);
+    if payload_len == 0 || usize::from(urg_ptr) >= payload_len {
+        buf[tcp_start + TCP_FLAGS_OFFSET] = flags & !TCP_FLAG_URG;
+        buf[tcp_start + TCP_URG_OFFSET] = 0;
+        buf[tcp_start + TCP_URG_OFFSET + 1] = 0;
+    }
+}
+
+/// Rewrites SACK block sequence edges using reverse-direction mangling state.
+fn rewrite_sack_options(
+    buf: &mut [u8],
+    tcp_start: usize,
+    data_offset: usize,
+    flow: &TcpFlowState,
+    dir: TcpFlowDirection,
+) {
     if data_offset <= 20 {
         return;
     }
@@ -386,8 +422,43 @@ fn strip_sack_options(buf: &mut [u8], tcp_start: usize, data_offset: usize) {
         if len < 2 || i + len > opts_end {
             break;
         }
-        if kind == TCP_OPTION_KIND_SACK_PERMITTED || kind == TCP_OPTION_KIND_SACK {
-            buf[i..i + len].fill(TCP_OPTION_KIND_NOP);
+        if kind == TCP_OPTION_KIND_SACK {
+            let option_start = i;
+            let option_end = i + len;
+            let block_count = len.saturating_sub(2) / 8;
+            let mut translated = alloc::vec::Vec::new();
+            for block in 0..block_count {
+                let off = option_start + 2 + block * 8;
+                let left = u32::from_be_bytes([
+                    buf[off],
+                    buf[off + 1],
+                    buf[off + 2],
+                    buf[off + 3],
+                ]);
+                let right = u32::from_be_bytes([
+                    buf[off + 4],
+                    buf[off + 5],
+                    buf[off + 6],
+                    buf[off + 7],
+                ]);
+                if let Some(pair) = flow.translate_sack_block(dir, left, right) {
+                    translated.push(pair);
+                }
+            }
+            if translated.is_empty() {
+                buf[option_start..option_end].fill(TCP_OPTION_KIND_NOP);
+            } else {
+                let new_len = 2 + translated.len() * 8;
+                buf[option_start + 1] = u8::try_from(new_len).unwrap_or(u8::MAX);
+                for (idx, (left, right)) in translated.iter().enumerate() {
+                    let off = option_start + 2 + idx * 8;
+                    buf[off..off + 4].copy_from_slice(&left.to_be_bytes());
+                    buf[off + 4..off + 8].copy_from_slice(&right.to_be_bytes());
+                }
+                if new_len < len {
+                    buf[option_start + new_len..option_end].fill(TCP_OPTION_KIND_NOP);
+                }
+            }
         }
         i += len;
     }
@@ -1070,25 +1141,75 @@ mod tests {
     }
 
     #[test]
-    fn strip_sack_options_replaces_sack_with_nop() {
+    fn rewrite_sack_options_translates_block_edges() {
         let tcp_start = 50usize;
         let mut frame = vec![0u8; 100];
-        frame[tcp_start + 12] = 0x80; // 32-byte header
-        frame[tcp_start + 13] = 0x10; // ACK
-        // options: SACK permitted (4, 2) + padding NOPs to 24 bytes
-        frame[tcp_start + 20] = TCP_OPTION_KIND_SACK_PERMITTED;
-        frame[tcp_start + 21] = 2;
-        frame[tcp_start + 22] = TCP_OPTION_KIND_SACK;
-        frame[tcp_start + 23] = 10;
-        for b in &mut frame[tcp_start + 24..tcp_start + 32] {
-            *b = 0xAB;
+        frame[tcp_start + 12] = 0x80;
+        frame[tcp_start + 13] = 0x10;
+        frame[tcp_start + 20] = TCP_OPTION_KIND_SACK;
+        frame[tcp_start + 21] = 10;
+        frame[tcp_start + 22..tcp_start + 26].copy_from_slice(&1010u32.to_be_bytes());
+        frame[tcp_start + 26..tcp_start + 30].copy_from_slice(&1040u32.to_be_bytes());
+
+        let mut flow = TcpFlowState::default();
+        flow.apply_keep_edit(TcpFlowDirection::ClientToServer, 1000, 80, 40);
+        rewrite_sack_options(&mut frame, tcp_start, 32, &flow, TcpFlowDirection::ServerToClient);
+
+        assert_eq!(frame[tcp_start + 20], TCP_OPTION_KIND_SACK);
+        assert_eq!(frame[tcp_start + 21], 10);
+        assert_eq!(
+            u32::from_be_bytes(frame[tcp_start + 22..tcp_start + 26].try_into().unwrap()),
+            970
+        );
+        assert_eq!(
+            u32::from_be_bytes(frame[tcp_start + 26..tcp_start + 30].try_into().unwrap()),
+            1000
+        );
+    }
+
+    #[test]
+    fn adjust_urg_pointer_clears_urg_when_past_kept_payload() {
+        let tcp_start = 50usize;
+        let mut frame = vec![0u8; 80];
+        frame[tcp_start + 13] = 0x30; // ACK + URG
+        frame[tcp_start + 18] = 0;
+        frame[tcp_start + 19] = 40; // urgent pointer at byte 40
+
+        adjust_urg_pointer(&mut frame, tcp_start, 32);
+        assert_eq!(frame[tcp_start + 13] & TCP_FLAG_URG, 0);
+        assert_eq!([frame[tcp_start + 18], frame[tcp_start + 19]], [0, 0]);
+    }
+
+    #[test]
+    fn adjust_urg_pointer_keeps_urg_inside_kept_prefix() {
+        let tcp_start = 50usize;
+        let mut frame = vec![0u8; 80];
+        frame[tcp_start + 13] = 0x30;
+        frame[tcp_start + 18] = 0;
+        frame[tcp_start + 19] = 16;
+
+        adjust_urg_pointer(&mut frame, tcp_start, 32);
+        assert_ne!(frame[tcp_start + 13] & TCP_FLAG_URG, 0);
+        assert_eq!([frame[tcp_start + 18], frame[tcp_start + 19]], [0, 16]);
+    }
+
+    #[test]
+    fn apply_edit_clears_urg_when_pointer_in_dropped_tail() {
+        let mut view = build_tcp_segment(&[0xAA; 64], 1000);
+        let tcp_start = view.tcp_header().unwrap().header_range.start;
+        if let Some(buf) = view.eth_frame_buf_mut(0) {
+            buf[tcp_start + 13] |= TCP_FLAG_URG;
+            buf[tcp_start + 18] = 0;
+            buf[tcp_start + 19] = 48;
         }
 
-        strip_sack_options(&mut frame, tcp_start, 32);
-        assert_eq!(frame[tcp_start + 20], TCP_OPTION_KIND_NOP);
-        assert_eq!(frame[tcp_start + 21], TCP_OPTION_KIND_NOP);
-        assert_eq!(frame[tcp_start + 22], TCP_OPTION_KIND_NOP);
-        assert_eq!(frame[tcp_start + 23..tcp_start + 32], [TCP_OPTION_KIND_NOP; 9]);
+        let mut flow = TcpFlowState::default();
+        view.tcp_overwriter(&mut flow, TcpFlowDirection::ClientToServer)
+            .apply_edit(TcpPayloadEdit { keep_len: 32 })
+            .expect("edit");
+
+        let frame = view.eth_frames().next().unwrap();
+        assert_eq!(frame[tcp_start + 13] & TCP_FLAG_URG, 0);
     }
 
     #[test]

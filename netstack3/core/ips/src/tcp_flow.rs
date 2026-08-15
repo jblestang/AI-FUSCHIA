@@ -283,6 +283,55 @@ impl TcpFlowState {
         };
         (seq, ack)
     }
+
+    /// Translates a SACK block on the stream **opposite** to `dir` (original → mangled).
+    ///
+    /// Returns `None` when the block falls entirely in a dropped hole or collapses
+    /// after clamping.
+    pub fn translate_sack_block(
+        &self,
+        dir: TcpFlowDirection,
+        left: u32,
+        right: u32,
+    ) -> Option<(u32, u32)> {
+        translate_sack_block(dir.reverse().state(self), left, right)
+    }
+}
+
+fn translate_sack_block(
+    state: &TcpDirectionState,
+    left: u32,
+    right: u32,
+) -> Option<(u32, u32)> {
+    if right <= left {
+        return None;
+    }
+
+    for hole in &state.dropped_ranges {
+        if left >= hole.start && right <= hole.end {
+            return None;
+        }
+    }
+
+    let mut clamped_right = right;
+    for hole in &state.dropped_ranges {
+        if left < hole.start && clamped_right > hole.start {
+            clamped_right = hole.start;
+        }
+    }
+    if state.committed_end > 0 {
+        clamped_right = clamped_right.min(state.committed_end);
+    }
+    if clamped_right <= left {
+        return None;
+    }
+
+    let left_m = left.wrapping_sub(state.delta);
+    let right_m = clamped_right.wrapping_sub(state.delta);
+    if right_m <= left_m {
+        return None;
+    }
+    Some((left_m, right_m))
 }
 
 fn segment_overlaps_dropped_interior(
@@ -512,6 +561,37 @@ mod tests {
             false,
         );
         assert_eq!(seq, 1040);
+    }
+
+    #[test]
+    fn sack_block_translated_and_clamped_to_committed_end() {
+        let mut flow = TcpFlowState::default();
+        flow.apply_keep_edit(TcpFlowDirection::ClientToServer, 1000, 80, 40);
+        let block = flow.translate_sack_block(
+            TcpFlowDirection::ServerToClient,
+            1010,
+            1040,
+        );
+        assert_eq!(block, Some((970, 1000)));
+    }
+
+    #[test]
+    fn sack_block_wholly_in_dropped_hole_is_removed() {
+        let mut flow = TcpFlowState::default();
+        flow.apply_keep_edit(TcpFlowDirection::ClientToServer, 1000, 80, 40);
+        assert!(flow
+            .translate_sack_block(TcpFlowDirection::ServerToClient, 1040, 1080)
+            .is_none());
+    }
+
+    #[test]
+    fn sack_block_spanning_hole_is_clamped() {
+        let mut flow = TcpFlowState::default();
+        flow.apply_keep_edit(TcpFlowDirection::ClientToServer, 1000, 80, 40);
+        assert_eq!(
+            flow.translate_sack_block(TcpFlowDirection::ServerToClient, 1020, 1060),
+            Some((980, 1000))
+        );
     }
 
     #[test]
