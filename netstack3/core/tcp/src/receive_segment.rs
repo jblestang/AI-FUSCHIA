@@ -176,6 +176,11 @@ pub struct TcpRecvSegment<I: Ip> {
 }
 
 impl<I: Ip> TcpRecvSegment<I> {
+    /// Zero-copy wire view (same storage as [`Self::view`]).
+    pub fn shared_view(&self) -> &SharedPacketView {
+        &self.view
+    }
+
     /// Attaches TCP sequence metadata computed at delivery time.
     pub fn with_tcp(mut self, tcp: TcpSegmentReceiveMeta) -> Self {
         self.tcp = tcp;

@@ -71,7 +71,8 @@ use netstack3_ip::socket::{
     IpSocketHandler,
 };
 use netstack3_ip::{
-    self as ip, BaseTransportIpContext, IpLayerIpExt, SocketMetadata, TransportIpContext,
+    self as ip, BaseTransportIpContext, IpLayerIpExt, IpReceiveMeta, SharedPacketView,
+    SocketMetadata, TransportIpContext,
 };
 use netstack3_trace::{TraceResourceId, trace_duration};
 use packet_formats::ip::{IpProto, Ipv4Proto, Ipv6Proto};
@@ -85,6 +86,9 @@ use crate::internal::base::{
 use crate::internal::buffer::{Buffer, IntoBuffers, ReceiveBuffer, SendBuffer};
 use crate::internal::counters::{
     self, CombinedTcpCounters, TcpCounterContext, TcpCountersRefs, TcpCountersWithSocket,
+};
+use crate::internal::receive_segment::{
+    TcpPacketMeta, TcpRecvSegment, TcpSegmentReceiveMeta,
 };
 use crate::internal::settings::TcpSettings;
 use crate::internal::socket::accept_queue::{AcceptQueue, ListenerNotifier};
@@ -5776,6 +5780,43 @@ where
         id: &TcpApiSocketId<I, C>,
     ) -> TcpSocketInfo<<C::BindingsContext as InstantBindingsTypes>::Instant> {
         self.core_ctx().with_socket(id, |socket_state| socket_state.tcp_info(id.counters()))
+    }
+}
+
+impl<I, C> TcpApi<I, C>
+where
+    I: DualStackIpExt,
+    C: ContextPair,
+    C::CoreContext: TcpContext<I, C::BindingsContext>,
+    C::BindingsContext: TcpReceiveBindingsContext<
+        I,
+        <<C as ContextPair>::CoreContext as DeviceIdContext<AnyDevice>>::DeviceId,
+    >,
+{
+    /// Dequeues the next received TCP segment without copying wire bytes.
+    ///
+    /// Returns `None` when the socket segment queue is empty. Bindings must
+    /// implement [`TcpReceiveBindingsContext::try_recv_tcp_segment`].
+    ///
+    /// The returned [`TcpRecvSegment::view`] is a [`SharedPacketView`] over the
+    /// pinned RX frame (including the IP fragment chain when reassembly occurred).
+    pub fn try_recv_segment(
+        &mut self,
+        id: &TcpApiSocketId<I, C>,
+    ) -> Option<TcpRecvSegment<I>> {
+        let Self(pair, IpVersionMarker { .. }) = self;
+        let (_, bindings_ctx) = pair.contexts();
+        bindings_ctx.try_recv_tcp_segment(id)
+    }
+
+    /// Dequeues the next received segment, returning metadata and a [`SharedPacketView`].
+    pub fn try_recv_view(
+        &mut self,
+        id: &TcpApiSocketId<I, C>,
+    ) -> Option<(TcpPacketMeta<I>, IpReceiveMeta, TcpSegmentReceiveMeta, SharedPacketView)> {
+        self.try_recv_segment(id).map(|segment| {
+            (segment.meta, segment.ip_meta, segment.tcp, segment.view)
+        })
     }
 }
 
