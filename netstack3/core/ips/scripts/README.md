@@ -18,7 +18,7 @@ Do **not** bind this tool to the default-route interface or use NFQUEUE/iptables
 
 ```bash
 # Mirror traffic to eth1 on the IDS host, then:
-sudo ./netstack3/core/ips/scripts/ips-passive-monitor.sh eth1 --verbose
+sudo ./netstack3/core/ips/scripts/ips-passive-monitor.sh eth1
 
 # Build only (no capture):
 sudo ./netstack3/core/ips/scripts/ips-passive-monitor.sh eth1 --build-only
@@ -28,22 +28,23 @@ sudo ./netstack3/core/ips/scripts/ips-passive-monitor.sh eth1 --build-only
 
 | Flag | Description |
 |------|-------------|
-| `--verbose` / `-v` | Log each UDP/TCP flow delivered to L7 |
 | `--promisc` | Join interface promiscuous multicast (usually unnecessary on SPAN ports) |
 | `--build-only` | Compile the example and exit |
+
+Rejected frames (malformed Ethernet, non-IP, non-UDP/TCP, truncated) are printed to stdout; accepted flows are counted silently until Ctrl+C summary.
 
 ## Manual run
 
 ```bash
 sudo cargo run -p netstack3-ips --example passive_capture -- \
-  --interface eth1 --verbose
+  --interface eth1
 ```
 
 ## What it does
 
 1. Opens `AF_PACKET` `SOCK_RAW` bound to the capture interface (**recv only**)
 2. Feeds each Ethernet frame to `process_ethernet_frame`
-3. Prints flow summaries (5-tuple, payload length, reassembly outcome)
+3. **Logs only rejected frames** (length, EtherType, hex prefix)
 4. Prints capture statistics on Ctrl+C
 
 ## Requirements

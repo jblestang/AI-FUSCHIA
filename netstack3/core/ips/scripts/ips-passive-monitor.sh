@@ -12,7 +12,7 @@
 #
 # Usage:
 #   sudo ./netstack3/core/ips/scripts/ips-passive-monitor.sh eth1
-#   sudo ./netstack3/core/ips/scripts/ips-passive-monitor.sh eth1 --verbose
+#   sudo ./netstack3/core/ips/scripts/ips-passive-monitor.sh eth1
 #
 # Recommended topology (copy-only, no inline modification):
 #
@@ -35,17 +35,15 @@ IFACE="${1:-}"
 shift || true
 
 if [[ -z "${IFACE}" ]]; then
-  echo "Usage: sudo $0 IFACE [--verbose] [--promisc] [--build-only]" >&2
+  echo "Usage: sudo $0 IFACE [--promisc] [--build-only]" >&2
   echo "  IFACE     Mirror/SPAN or dedicated sniff interface (not the live path)" >&2
   exit 2
 fi
 
-VERBOSE=()
 PROMISC=()
 BUILD_ONLY=0
 for arg in "$@"; do
   case "${arg}" in
-    --verbose|-v) VERBOSE+=(--verbose) ;;
     --promisc) PROMISC+=(--promisc) ;;
     --build-only) BUILD_ONLY=1 ;;
     *)
@@ -79,7 +77,7 @@ fi
 # Bring link up so the NIC receives mirrored frames; we do not add routes or iptables rules.
 ip link set "${IFACE}" up
 
-echo "Starting passive IPS capture on ${IFACE} (read-only, no transmit path configured)."
+echo "Starting passive IPS capture on ${IFACE} (read-only; logs rejected frames only)."
 echo "Live traffic on other interfaces is not modified by this tool."
 
 cd "${REPO_ROOT}"
@@ -93,5 +91,4 @@ fi
 
 exec "${REPO_ROOT}/target/release/examples/passive_capture" \
   --interface "${IFACE}" \
-  "${PROMISC[@]}" \
-  "${VERBOSE[@]}"
+  "${PROMISC[@]}"

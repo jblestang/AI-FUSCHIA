@@ -123,43 +123,33 @@ mod linux {
 
     struct FlowAnalyzer {
         stats: CaptureStats,
-        verbose: bool,
+    }
+
+    fn log_rejected_frame(bytes: &[u8]) {
+        let ethertype = bytes.get(12..14).map(|s| u16::from_be_bytes([s[0], s[1]]));
+        let hex_limit = bytes.len().min(64);
+        let hex: String = bytes[..hex_limit]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join("");
+        let truncated = if bytes.len() > hex_limit { " (truncated)" } else { "" };
+        match ethertype {
+            Some(et) => println!(
+                "REJECTED len={} ethertype=0x{et:04x} hex={hex}{truncated}",
+                bytes.len()
+            ),
+            None => println!("REJECTED len={} hex={hex}{truncated}", bytes.len()),
+        }
     }
 
     impl FlowAnalyzer {
-        fn log_udp(&mut self, view: &ReceivedUdpDatagramView) {
-            let (src, dst) = view.addrs();
-            let ports = view.udp_header().map(|h| (h.src_port, h.dst_port));
-            let payload_len: usize = view.payload_slices().iter().map(|s| s.len()).sum();
-            let outcome = view.ip_fragment_metadata().reassembly_outcome;
-            if self.verbose {
-                println!(
-                    "UDP {src} -> {dst} ports={ports:?} payload={payload_len}B reassembly={outcome:?}"
-                );
-            }
+        fn note_udp(&mut self, _view: &ReceivedUdpDatagramView) {
+            self.stats.udp_delivered += 1;
         }
 
-        fn log_tcp(&mut self, view: &ReceivedTcpSegmentView) {
-            let (src, dst) = view.addrs();
-            let hdr = view.tcp_header();
-            let payload_len: usize = view.payload_slices().iter().map(|s| s.len()).sum();
-            let outcome = view.ip_fragment_metadata().reassembly_outcome;
-            if self.verbose {
-                if let Some(h) = hdr {
-                    let src_port = h.src_port;
-                    let dst_port = h.dst_port;
-                    println!(
-                        "TCP {src}:{src_port} -> {dst}:{dst_port} seq={} ack={} syn={} fin={} rst={} payload={payload_len}B reassembly={outcome:?}",
-                        h.seq_num,
-                        h.ack_num,
-                        h.syn_flag,
-                        h.fin_flag,
-                        h.rst_flag,
-                    );
-                } else {
-                    println!("TCP {src} -> {dst} payload={payload_len}B reassembly={outcome:?}");
-                }
-            }
+        fn note_tcp(&mut self, _view: &ReceivedTcpSegmentView) {
+            self.stats.tcp_delivered += 1;
         }
     }
 
@@ -169,8 +159,7 @@ mod linux {
             _device_id: &CaptureDeviceId,
             view: ReceivedUdpDatagramView,
         ) -> Result<(), IpsReceiveError> {
-            self.stats.udp_delivered += 1;
-            self.log_udp(&view);
+            self.note_udp(&view);
             Ok(())
         }
 
@@ -179,34 +168,32 @@ mod linux {
             _device_id: &CaptureDeviceId,
             view: ReceivedTcpSegmentView,
         ) -> Result<(), IpsReceiveError> {
-            self.stats.tcp_delivered += 1;
-            self.log_tcp(&view);
+            self.note_tcp(&view);
             Ok(())
         }
     }
 
     fn usage() -> ! {
         eprintln!(
-            "Usage: passive_capture --interface IFACE [--promisc] [--verbose]\n\
+            "Usage: passive_capture --interface IFACE [--promisc]\n\
              \n\
              Passive read-only IDS tap using AF_PACKET (no transmit, no inline modification).\n\
+             Logs only frames rejected by IPS ingress (malformed/non-IP/non-L4/truncated).\n\
              Point IFACE at a SPAN/mirror port or dedicated sniff NIC — not the live gateway path."
         );
         std::process::exit(2);
     }
 
-    fn parse_args() -> (String, bool, bool) {
+    fn parse_args() -> (String, bool) {
         let mut args = std::env::args().skip(1);
         let mut interface = None;
         let mut promisc = false;
-        let mut verbose = false;
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--interface" | "-i" => {
                     interface = args.next();
                 }
                 "--promisc" => promisc = true,
-                "--verbose" | "-v" => verbose = true,
                 "--help" | "-h" => usage(),
                 other => {
                     eprintln!("Unknown argument: {other}");
@@ -218,7 +205,7 @@ mod linux {
             eprintln!("Missing --interface IFACE");
             usage();
         });
-        (interface, promisc, verbose)
+        (interface, promisc)
     }
 
     fn open_passive_socket(interface: &str, promisc: bool) -> Result<c_int, String> {
@@ -284,10 +271,10 @@ mod linux {
     }
 
     pub fn run() -> Result<(), String> {
-        let (interface, promisc, verbose) = parse_args();
+        let (interface, promisc) = parse_args();
 
         eprintln!(
-            "IPS passive capture on {interface} (read-only AF_PACKET, promisc={promisc}, verbose={verbose})"
+            "IPS passive capture on {interface} (read-only AF_PACKET, promisc={promisc}; logging rejected frames only)"
         );
         eprintln!("Press Ctrl+C to stop. This process does not transmit on {interface}.");
 
@@ -299,7 +286,7 @@ mod linux {
         let fd = open_passive_socket(&interface, promisc)?;
         let device_id = CaptureDeviceId;
         let state = IpsState::new();
-        let mut handler = FlowAnalyzer { stats: CaptureStats::default(), verbose };
+        let mut handler = FlowAnalyzer { stats: CaptureStats::default() };
 
         let mut buf = vec![0u8; 65536];
         while RUNNING.load(Ordering::SeqCst) {
@@ -324,7 +311,10 @@ mod linux {
             let frame = Buf::new(frame_bytes, ..);
             match process_ethernet_frame(&state, &mut handler, &device_id, frame) {
                 Ok(()) => handler.stats.frames_accepted += 1,
-                Err(_frame) => handler.stats.frames_rejected += 1,
+                Err(rejected) => {
+                    handler.stats.frames_rejected += 1;
+                    log_rejected_frame(rejected.as_ref());
+                }
             }
             handler.stats.l7_queue_full = state.l7_queue_full_drops();
         }
