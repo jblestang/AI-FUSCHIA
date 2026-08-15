@@ -40,7 +40,7 @@ pub use context::{
     IpsIngressHandler, IpsIngressResult, IpsReceiveBindingsContext, IpsReceiveError,
     TryIntoIpsFrame,
 };
-pub use overwrite::{UdpOverwriteError, UdpOverwriter};
+pub use overwrite::{UdpOverwriteChecksum, UdpOverwriteError, UdpOverwriter};
 pub use receive::process_ethernet_frame;
 pub use state::IpsState;
 pub use view::{

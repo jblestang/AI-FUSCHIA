@@ -5,8 +5,8 @@
 //! Example: overwrite UDP payload after L7 deep inspection with [`UdpOverwriter`].
 //!
 //! Receives a UDP datagram, scans the payload, replaces malicious bytes in place,
-//! and refreshes UDP/IPv4 length fields on the backing frame buffer. Checksum
-//! fields are zeroed for NIC offload on egress.
+//! and refreshes UDP/IPv4 length fields on the backing frame buffer.
+//! Checksum handling is configurable via [`UdpOverwriteChecksum`].
 //!
 //! ```text
 //! cargo run -p netstack3-ips --features testutils --example udp_overwrite_payload
@@ -20,7 +20,7 @@ use netstack3_base::testutil::FakeDeviceId;
 use netstack3_base::NetworkSerializationContext;
 use netstack3_ips::{
     IpsReceiveBindingsContext, IpsReceiveError, IpsState, ReceivedUdpDatagramView,
-    process_ethernet_frame,
+    UdpOverwriteChecksum, process_ethernet_frame,
 };
 use packet::{Buf, NestableSerializer as _, Serializer};
 use packet_formats::ethernet::{EtherType, ETHERNET_HDR_LEN_NO_TAG, EthernetFrameBuilder};
@@ -35,6 +35,11 @@ const LOCAL_PORT: NonZeroU16 = NonZeroU16::new(100).unwrap();
 const REMOTE_PORT: NonZeroU16 = NonZeroU16::new(200).unwrap();
 /// Simulated attack marker byte in the original payload.
 const ATTACK_MARKER: u8 = 0xEE;
+
+/// Checksum mode for the demo agent. Use [`UdpOverwriteChecksum::NicOffload`] when
+/// the egress NIC computes IPv4/UDP checksums; use
+/// [`UdpOverwriteChecksum::ComputeInSoftware`] otherwise.
+const CHECKSUM_MODE: UdpOverwriteChecksum = UdpOverwriteChecksum::NicOffload;
 
 /// Example IPS agent: inspect payload, then overwrite with a sanitized version.
 struct SanitizingAgent {
@@ -58,7 +63,7 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for SanitizingAgent {
         let sanitized: Vec<u8> = inspected.into_iter().filter(|b| *b != ATTACK_MARKER).collect();
         assert_eq!(sanitized.len(), 0, "all bytes were attack markers in this demo");
 
-        view.udp_overwriter()
+        view.udp_overwriter_with_checksum(CHECKSUM_MODE)
             .overwrite_payload(&sanitized)
             .expect("overwrite payload with updated lengths");
 
@@ -103,22 +108,28 @@ fn main() {
     let frame = view.eth_frames().next().expect("frame");
     let ip_offset = ETHERNET_HDR_LEN_NO_TAG;
     let udp_hdr = view.udp_header().expect("udp header");
-    assert_eq!(
-        [
-            frame[ip_offset + 10],
-            frame[ip_offset + 11],
-        ],
-        [0, 0],
-        "IPv4 header checksum zeroed for NIC offload"
-    );
-    assert_eq!(
-        [
-            frame[udp_hdr.header_range.start + 6],
-            frame[udp_hdr.header_range.start + 7],
-        ],
-        [0, 0],
-        "UDP checksum zeroed for NIC offload"
-    );
-
-    println!("UDP length field: {udp_len}; IPv4/UDP checksum fields zeroed for NIC offload.");
+    match CHECKSUM_MODE {
+        UdpOverwriteChecksum::NicOffload => {
+            assert_eq!(
+                [
+                    frame[ip_offset + 10],
+                    frame[ip_offset + 11],
+                ],
+                [0, 0],
+                "IPv4 header checksum zeroed for NIC offload"
+            );
+            assert_eq!(
+                [
+                    frame[udp_hdr.header_range.start + 6],
+                    frame[udp_hdr.header_range.start + 7],
+                ],
+                [0, 0],
+                "UDP checksum zeroed for NIC offload"
+            );
+            println!("UDP length field: {udp_len}; checksum fields zeroed for NIC offload.");
+        }
+        UdpOverwriteChecksum::ComputeInSoftware => {
+            println!("UDP length field: {udp_len}; IPv4/UDP checksums computed in software.");
+        }
+    }
 }
