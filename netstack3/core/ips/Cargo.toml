@@ -1,0 +1,54 @@
+[package]
+name = "netstack3-ips"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "netstack3_ips"
+
+[features]
+testutils = ["instrumented", "netstack3_base/testutils"]
+instrumented = []
+benchmark-harness = []
+benchmark = ["benchmark-harness", "netstack3_base/benchmark-harness", "dep:criterion"]
+benchmark-instrumented = ["benchmark", "testutils", "instrumented", "netstack3_base/testutils"]
+
+[dependencies]
+assert_matches = { workspace = true }
+criterion = { workspace = true, optional = true }
+log = { workspace = true }
+net_types = { package = "net-types", path = "../../../libs/net-types" }
+netstack3_base = { package = "netstack3-base", path = "../base" }
+netstack3_hashmap = { package = "netstack3-hashmap", path = "../hashmap" }
+packet = { path = "../../../libs/packet" }
+packet_formats = { package = "packet_formats", path = "../../../libs/packet-formats" }
+zerocopy = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+netstack3_base = { package = "netstack3-base", path = "../base", features = ["testutils"] }
+
+[[example]]
+name = "detect_tos_mismatch"
+required-features = ["testutils"]
+
+[[example]]
+name = "detect_ip_overlap"
+required-features = ["testutils"]
+
+[[example]]
+name = "detect_forced_segmentation"
+required-features = ["testutils"]
+
+[[example]]
+name = "iterate_payload"
+required-features = ["testutils"]
+
+[[bench]]
+name = "ips_receive_throughput"
+harness = false
+required-features = ["benchmark"]
+
+[[example]]
+name = "profile_ips_receive"
+required-features = ["benchmark"]

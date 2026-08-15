@@ -23,6 +23,7 @@ netstack3_device = { package = "netstack3-device", path = "device" }
 netstack3_filter = { package = "netstack3-filter", path = "filter" }
 netstack3_hashmap = { package = "netstack3-hashmap", path = "hashmap" }
 netstack3_icmp_echo = { package = "netstack3-icmp-echo", path = "icmp_echo" }
+netstack3_ips = { package = "netstack3-ips", path = "ips" }
 netstack3_ip = { package = "netstack3-ip", path = "ip" }
 netstack3_macros = { package = "netstack3-macros", path = "macros" }
 netstack3_sync = { package = "netstack3-sync", path = "sync" }

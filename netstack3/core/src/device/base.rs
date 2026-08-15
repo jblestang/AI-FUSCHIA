@@ -229,7 +229,7 @@ where
     L: LockBefore<crate::lock_ordering::IcmpAllSocketsSet<Ipv4>>,
     I: Ip,
 {
-    fn receive_meta<B: BufferMut + Debug>(
+    fn receive_meta<B: BufferMut + Debug + netstack3_base::IpsRxFrameBuffer>(
         self,
         core_ctx: &mut CoreCtx<'_, BC, L>,
         bindings_ctx: &mut BC,

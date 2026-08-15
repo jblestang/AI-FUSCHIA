@@ -199,7 +199,7 @@ where
     }
 
     /// Receive a device layer frame from the network.
-    pub fn receive_frame<B: BufferMut + Debug>(
+    pub fn receive_frame<B: BufferMut + Debug + netstack3_base::IpsRxFrameBuffer>(
         &mut self,
         meta: D::FrameMetadata<BaseDeviceId<D, C::BindingsContext>>,
         frame: B,

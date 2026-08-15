@@ -180,6 +180,7 @@ pub trait IpBindingsContext<I: IpExt>:
     + NudBindingsContext<I, EthernetLinkDevice, EthernetDeviceId<Self>>
     + device::DeviceLayerEventDispatcher
     + device::socket::DeviceSocketBindingsContext<DeviceId<Self>>
+    + netstack3_ips::IpsReceiveBindingsContext<DeviceId<Self>>
     + ReferenceNotifiers
     + 'static
 {
@@ -203,6 +204,7 @@ where
         + NudBindingsContext<I, EthernetLinkDevice, EthernetDeviceId<Self>>
         + device::DeviceLayerEventDispatcher
         + device::socket::DeviceSocketBindingsContext<DeviceId<Self>>
+        + netstack3_ips::IpsReceiveBindingsContext<DeviceId<Self>>
         + ReferenceNotifiers
         + 'static,
 {

@@ -133,6 +133,18 @@ pub mod icmp {
     };
 }
 
+/// Zero-copy IPS UDP receive path for Layer 7 analysis.
+pub mod ips {
+    mod integration;
+
+    pub use netstack3_ips::{
+        FragmentEvent, IpFragmentInfo, IpFragmentMetadata, IpsIngressHandler,
+        IpsReceiveBindingsContext, IpsReceiveError, IpsState, PayloadSliceView,
+        ReceivedUdpDatagramView, ReassemblyOutcome, TryIntoIpsFrame, UdpHeaderView,
+        process_ethernet_frame,
+    };
+}
+
 /// The Internet Protocol, versions 4 and 6.
 pub mod ip {
     #[path = "."]
