@@ -9,7 +9,17 @@ name = "netstack3_core"
 
 [features]
 instrumented = []
-testutils = ["instrumented"]
+testutils = [
+    "instrumented",
+    "netstack3_base/testutils",
+    "netstack3_datagram/testutils",
+    "netstack3_device/testutils",
+    "netstack3_filter/testutils",
+    "netstack3_icmp_echo/testutils",
+    "netstack3_ip/testutils",
+    "netstack3_tcp/testutils",
+    "netstack3_udp/testutils",
+]
 
 [dependencies]
 assert_matches = { workspace = true }
@@ -32,3 +42,14 @@ netstack3_udp = { package = "netstack3-udp", path = "udp" }
 packet = { path = "../../libs/packet" }
 packet_formats = { package = "packet_formats", path = "../../libs/packet-formats" }
 zerocopy = { workspace = true, features = ["derive"] }
+
+[[test]]
+name = "linux_bridge_host"
+path = "tests/linux_bridge_host.rs"
+harness = false
+required-features = ["testutils"]
+
+[dev-dependencies]
+env_logger = "0.11"
+netstack3-base = { path = "base", features = ["testutils"] }
+nix = { version = "0.29", features = ["fs", "ioctl"] }

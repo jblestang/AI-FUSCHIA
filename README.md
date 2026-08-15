@@ -22,7 +22,30 @@ cargo check -p netstack3-core
 
 # Check the entire workspace
 cargo check --workspace
+
+# Build the Linux L2 bridge host (TAP + netstack3; lives in core integration test)
+cargo test -p netstack3-core --test linux_bridge_host --features testutils --no-run
 ```
+
+## Linux L2 bridge host
+
+Attaches netstack3 to a TAP interface enslaved to a Linux bridge. Implemented as a
+`netstack3-core` integration test so it reuses `FakeBindingsCtx` with minimal core
+changes (testutils feature wiring + one `[[test]]` entry).
+
+```bash
+# Create bridge + TAP (as root)
+ip link add name br0 type bridge
+ip tuntap add dev tap0 mode tap
+ip link set tap0 master br0
+ip link set tap0 address 00:01:02:03:04:05 up
+ip link set br0 up
+
+# Run (needs /dev/net/tun)
+cargo test -p netstack3-core --test linux_bridge_host --features testutils -- --nocapture tap0
+```
+
+Default stack: `192.0.2.1/24`, MAC `00:01:02:03:04:05` (TEST_ADDRS).
 
 ## Layout
 

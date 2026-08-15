@@ -8,7 +8,7 @@ license.workspace = true
 name = "netstack3_datagram"
 
 [features]
-testutils = ["instrumented"]
+testutils = ["instrumented", "netstack3_base/testutils"]
 instrumented = []
 
 [dependencies]

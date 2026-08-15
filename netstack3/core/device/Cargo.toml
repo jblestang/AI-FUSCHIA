@@ -8,10 +8,16 @@ license.workspace = true
 name = "netstack3_device"
 
 [features]
-testutils = ["instrumented"]
+testutils = [
+    "instrumented",
+    "netstack3_base/testutils",
+    "dep:assert_matches",
+    "dep:netstack3_macros",
+]
 instrumented = []
 
 [dependencies]
+assert_matches = { workspace = true, optional = true }
 derivative = { workspace = true, features = ["use_core"] }
 lock_order = { package = "lock-order", path = "../lock-order" }
 log = { workspace = true }
@@ -20,6 +26,7 @@ netstack3_base = { package = "netstack3-base", path = "../base" }
 netstack3_filter = { package = "netstack3-filter", path = "../filter" }
 netstack3_hashmap = { package = "netstack3-hashmap", path = "../hashmap" }
 netstack3_ip = { package = "netstack3-ip", path = "../ip" }
+netstack3_macros = { package = "netstack3-macros", path = "../macros", optional = true }
 netstack3_trace = { package = "netstack3-trace", path = "../trace" }
 packet = { path = "../../../libs/packet" }
 packet_formats = { package = "packet_formats", path = "../../../libs/packet-formats" }
