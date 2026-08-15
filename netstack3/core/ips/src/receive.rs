@@ -400,3 +400,203 @@ fn build_udp_views(
 
     (udp_header, payload_parts)
 }
+
+#[cfg(test)]
+mod tests {
+    use core::num::NonZeroU16;
+
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use net_types::ethernet::Mac;
+    use net_types::ip::Ipv4Addr;
+    use netstack3_base::testutil::FakeDeviceId;
+    use netstack3_base::NetworkSerializationContext;
+    use packet::{Buf, NestableSerializer as _, Serializer};
+    use packet_formats::ethernet::{EtherType, EthernetFrameBuilder};
+    use packet_formats::ip::{IpProto, Ipv4Proto};
+    use packet_formats::udp::UdpPacketBuilder;
+
+    use super::*;
+    use crate::context::IpsReceiveError;
+    use crate::state::IpsFragmentDemuxConfig;
+
+    const DST: Ipv4Addr = Ipv4Addr::new([192, 0, 2, 1]);
+    const LOCAL_PORT: NonZeroU16 = NonZeroU16::new(100).unwrap();
+    const REMOTE_PORT: NonZeroU16 = NonZeroU16::new(200).unwrap();
+    const SRC_MAC: Mac = Mac::new([0x02, 0x02, 0x02, 0x02, 0x02, 0x01]);
+    const DST_MAC: Mac = Mac::new([0x02, 0x02, 0x02, 0x02, 0x02, 0x02]);
+    const FRAGMENT_BODY_LEN: usize = 104;
+
+    fn remote(src_host: u8) -> Ipv4Addr {
+        Ipv4Addr::new([192, 0, 2, src_host])
+    }
+
+    fn build_udp_fragment(
+        src: Ipv4Addr,
+        fragment_offset: u16,
+        more_fragments: bool,
+        payload_body: Vec<u8>,
+        fragment_id: u16,
+    ) -> Buf<Vec<u8>> {
+        let mut ip = packet_formats::ipv4::Ipv4PacketBuilder::new(
+            src,
+            DST,
+            64,
+            Ipv4Proto::Proto(IpProto::Udp),
+        );
+        ip.id(fragment_id);
+        ip.mf_flag(more_fragments);
+        ip.fragment_offset(if fragment_offset == 0 {
+            packet_formats::ip::FragmentOffset::ZERO
+        } else {
+            packet_formats::ip::FragmentOffset::new(fragment_offset).expect("valid offset")
+        });
+        let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
+        let bytes = Buf::new(payload_body, ..)
+            .wrap_in(ip)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner();
+        Buf::new(bytes, ..)
+    }
+
+    fn first_fragment_body(udp_total_len: usize, fill: u8) -> Vec<u8> {
+        let mut body = vec![
+            (REMOTE_PORT.get() >> 8) as u8,
+            (REMOTE_PORT.get() & 0xff) as u8,
+            (LOCAL_PORT.get() >> 8) as u8,
+            (LOCAL_PORT.get() & 0xff) as u8,
+            (udp_total_len >> 8) as u8,
+            (udp_total_len & 0xff) as u8,
+            0x00,
+            0x00,
+        ];
+        body.resize(FRAGMENT_BODY_LEN, fill);
+        body
+    }
+
+    struct Capture {
+        views: Vec<ReceivedUdpDatagramView>,
+    }
+
+    impl IpsReceiveBindingsContext<FakeDeviceId> for Capture {
+        fn receive_udp_datagram(
+            &mut self,
+            _device: &FakeDeviceId,
+            view: ReceivedUdpDatagramView,
+        ) -> Result<(), IpsReceiveError> {
+            self.views.push(view);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn demuxes_interleaved_fragments_from_multiple_sources() {
+        const PAYLOAD_LEN: usize = 200;
+        const UDP_TOTAL: usize = 8 + PAYLOAD_LEN;
+
+        let state = IpsState::with_demux_config(IpsFragmentDemuxConfig {
+            max_concurrent_assemblies: 64,
+        });
+        let mut handler = Capture { views: Vec::new() };
+
+        let streams = [
+            (remote(2), 0x1001_u16, 0xAA_u8),
+            (remote(3), 0x1002_u16, 0xBB_u8),
+            (remote(4), 0x1003_u16, 0xCC_u8),
+        ];
+
+        for &(src, id, fill) in &streams {
+            let frag0 = build_udp_fragment(src, 0, true, first_fragment_body(UDP_TOTAL, fill), id);
+            process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frag0).unwrap();
+        }
+        assert_eq!(
+            state.pending_fragment_assemblies(),
+            3,
+            "each source/id must occupy its own demux slot"
+        );
+
+        for &(src, id, fill) in &streams {
+            let second_len = UDP_TOTAL - FRAGMENT_BODY_LEN;
+            let frag1 = build_udp_fragment(
+                src,
+                13,
+                false,
+                vec![fill; second_len],
+                id,
+            );
+            process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frag1).unwrap();
+        }
+
+        assert_eq!(handler.views.len(), 3, "all three sources must reassemble");
+        assert_eq!(state.pending_fragment_assemblies(), 0);
+
+        let mut seen_sources = handler
+            .views
+            .iter()
+            .map(|view| match view.addrs().0 {
+                IpAddr::V4(v4) => v4,
+                _ => panic!("expected IPv4"),
+            })
+            .collect::<Vec<_>>();
+        seen_sources.sort_by_key(|addr| u32::from_be_bytes(addr.ipv4_bytes()));
+
+        assert_eq!(
+            seen_sources,
+            vec![remote(2), remote(3), remote(4)],
+            "demux must not conflate distinct sources"
+        );
+
+        for view in &handler.views {
+            assert_eq!(
+                view.ip_fragment_metadata().reassembly_outcome,
+                ReassemblyOutcome::Complete
+            );
+            assert_eq!(view.payload_slices().iter().map(|s| s.len()).sum::<usize>(), PAYLOAD_LEN);
+        }
+    }
+
+    #[test]
+    fn demux_capacity_evicts_oldest_incomplete_assembly() {
+        const PAYLOAD_LEN: usize = 200;
+        const UDP_TOTAL: usize = 8 + PAYLOAD_LEN;
+
+        let state = IpsState::with_demux_config(IpsFragmentDemuxConfig {
+            max_concurrent_assemblies: 2,
+        });
+        let mut handler = Capture { views: Vec::new() };
+
+        let fill_first = first_fragment_body(UDP_TOTAL, 0xDD);
+        for (src_host, id) in [(2, 0x2001_u16), (3, 0x2002_u16)] {
+            let frag = build_udp_fragment(remote(src_host), 0, true, fill_first.clone(), id);
+            process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frag).unwrap();
+        }
+        assert_eq!(state.pending_fragment_assemblies(), 2);
+
+        // Third distinct assembly must evict the oldest (src .2).
+        let frag = build_udp_fragment(remote(4), 0, true, fill_first, 0x2003_u16);
+        process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frag).unwrap();
+        assert_eq!(
+            state.pending_fragment_assemblies(),
+            2,
+            "cache must stay at capacity after eviction"
+        );
+
+        // Completing the evicted source must not deliver (and would evict another slot).
+        let second_len = UDP_TOTAL - FRAGMENT_BODY_LEN;
+        let frag1 = build_udp_fragment(remote(3), 13, false, vec![0xDD; second_len], 0x2002_u16);
+        process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frag1).unwrap();
+        assert_eq!(handler.views.len(), 1);
+        assert_eq!(
+            match handler.views[0].addrs().0 {
+                IpAddr::V4(v4) => v4,
+                _ => panic!("expected IPv4"),
+            },
+            remote(3)
+        );
+        assert_eq!(state.pending_fragment_assemblies(), 1, "src .4 first fragment still pending");
+    }
+}

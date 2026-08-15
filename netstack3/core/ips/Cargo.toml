@@ -49,6 +49,10 @@ required-features = ["testutils"]
 name = "udp_overwrite_payload"
 required-features = ["testutils"]
 
+[[example]]
+name = "demux_multi_source_fragments"
+required-features = ["testutils"]
+
 [[bench]]
 name = "ips_receive_throughput"
 harness = false

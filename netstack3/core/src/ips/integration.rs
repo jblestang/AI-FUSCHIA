@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use netstack3_device::DeviceId;
 use netstack3_device::IpsRxFrameHandler;
-use netstack3_ips::{IpsReceiveBindingsContext, process_ethernet_frame};
+use netstack3_ips::{IpsFragmentDemuxConfig, IpsReceiveBindingsContext, process_ethernet_frame};
 use packet::Buf;
 
 use crate::{BindingsContext, BindingsTypes, CoreCtx, StackState};
@@ -41,5 +41,15 @@ impl<BT: BindingsTypes> StackState<BT> {
     /// Enables IPS ingress on all devices.
     pub fn enable_ips_ingress(&mut self) {
         self.ips.enabled = true;
+    }
+
+    /// Configures IPS fragment demux capacity (IPv4 and IPv6 caches).
+    ///
+    /// Replaces the fragment assembly caches; call before ingress traffic or
+    /// when it is acceptable to drop in-progress assemblies.
+    pub fn configure_ips_fragment_demux(&mut self, config: IpsFragmentDemuxConfig) {
+        let enabled = self.ips.enabled;
+        self.ips = netstack3_ips::IpsState::with_demux_config(config);
+        self.ips.enabled = enabled;
     }
 }

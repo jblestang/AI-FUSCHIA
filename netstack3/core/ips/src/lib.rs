@@ -42,7 +42,7 @@ pub use context::{
 };
 pub use overwrite::{UdpOverwriteChecksum, UdpOverwriteError, UdpOverwriter};
 pub use receive::process_ethernet_frame;
-pub use state::IpsState;
+pub use state::{IpsFragmentDemuxConfig, IpsState};
 pub use view::{
     FragmentEvent, IpFragmentMetadata, IpFragmentInfo, PayloadSliceView, ReceivedUdpDatagramView,
     ReassemblyOutcome, UdpHeaderView,
