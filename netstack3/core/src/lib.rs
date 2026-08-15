@@ -140,7 +140,9 @@ pub mod ips {
     pub use netstack3_ips::{
         FragmentEvent, IpFragmentInfo, IpFragmentMetadata, IpsIngressHandler,
         IpsReceiveBindingsContext, IpsReceiveError, IpsState, PayloadSliceView,
-        ReceivedUdpDatagramView, ReassemblyOutcome, TryIntoIpsFrame, UdpHeaderView,
+        ReceivedTcpSegmentView, ReceivedUdpDatagramView, ReassemblyOutcome, TcpFlowKey,
+        TcpFlowState, TcpForwardAction, TcpHeaderView, TcpOverwriter, TcpPayloadEdit,
+        TryIntoIpsFrame, UdpHeaderView,
         process_ethernet_frame,
     };
 }

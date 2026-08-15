@@ -18,8 +18,8 @@ use netstack3_base::testutil::FakeDeviceId;
 use netstack3_base::NetworkSerializationContext;
 use netstack3_ips::analysis::{Rfc5722Overlap, detect_rfc5722_overlap};
 use netstack3_ips::{
-    IpsReceiveBindingsContext, IpsReceiveError, IpsState, ReceivedUdpDatagramView,
-    ReassemblyOutcome, process_ethernet_frame,
+    IpsReceiveBindingsContext, IpsReceiveError, IpsState, ReceivedTcpSegmentView,
+    ReceivedUdpDatagramView, ReassemblyOutcome, process_ethernet_frame,
 };
 use packet::{Buf, NestableSerializer as _, Serializer};
 use packet_formats::ethernet::{EtherType, EthernetFrameBuilder};
@@ -47,6 +47,14 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for ExampleIpsHandler {
     ) -> Result<(), IpsReceiveError> {
         self.overlap = detect_rfc5722_overlap(&view);
         self.last_view = Some(view);
+        Ok(())
+    }
+
+    fn receive_tcp_segment(
+        &mut self,
+        _device_id: &FakeDeviceId,
+        _view: ReceivedTcpSegmentView,
+    ) -> Result<(), IpsReceiveError> {
         Ok(())
     }
 }

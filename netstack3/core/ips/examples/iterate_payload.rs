@@ -17,8 +17,8 @@ use net_types::ip::Ipv4Addr;
 use netstack3_base::testutil::FakeDeviceId;
 use netstack3_base::NetworkSerializationContext;
 use netstack3_ips::{
-    IpsReceiveBindingsContext, IpsReceiveError, IpsState, ReceivedUdpDatagramView,
-    ReassemblyOutcome, process_ethernet_frame,
+    IpsReceiveBindingsContext, IpsReceiveError, IpsState, ReceivedTcpSegmentView,
+    ReceivedUdpDatagramView, ReassemblyOutcome, process_ethernet_frame,
 };
 use packet::{Buf, NestableSerializer as _, Serializer};
 use packet_formats::ethernet::{EtherType, EthernetFrameBuilder};
@@ -109,6 +109,14 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for PayloadIterationAgent {
         println!("Iterating payload slices (zero-copy):");
         self.scan = Some(scan_payload_slices(&view));
         self.last_view = Some(view);
+        Ok(())
+    }
+
+    fn receive_tcp_segment(
+        &mut self,
+        _device_id: &FakeDeviceId,
+        _view: ReceivedTcpSegmentView,
+    ) -> Result<(), IpsReceiveError> {
         Ok(())
     }
 }

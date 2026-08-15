@@ -28,6 +28,8 @@ zerocopy = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 netstack3_base = { package = "netstack3-base", path = "../base", features = ["testutils"] }
+proptest = "1.6"
+proptest-support = { path = "../../../libs/proptest-support" }
 
 [[example]]
 name = "detect_tos_mismatch"
@@ -47,6 +49,10 @@ required-features = ["testutils"]
 
 [[example]]
 name = "udp_overwrite_payload"
+required-features = ["testutils"]
+
+[[example]]
+name = "inspect_tcp_unknown_options"
 required-features = ["testutils"]
 
 [[example]]

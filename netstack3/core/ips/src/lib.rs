@@ -2,12 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Zero-copy IPS UDP receive path for Layer 7 analysis.
-//!
-//! This crate provides a driver-to-Layer-7 ingress path for UDP datagrams that
-//! bypasses UDP sockets, filtering, and routing. Datagrams are delivered as
-//! [`ReceivedUdpDatagramView`] values with multi-layer zero-copy access to
-//! Ethernet frames, IP fragments, UDP headers, and iovec-style payloads.
+//! Zero-copy IPS UDP/TCP receive paths for Layer 7 analysis.
 //!
 //! IP fragment reassembly follows RFC 5722: overlapping fragments abort
 //! reassembly and are surfaced via [`IpFragmentMetadata`].
@@ -20,11 +15,15 @@ extern crate std;
 extern crate alloc;
 
 mod context;
+mod frame_store;
 mod fragment;
 mod overwrite;
 mod receive;
 mod state;
+mod tcp_flow;
+mod tcp_overwrite;
 mod view;
+mod wire;
 
 #[cfg(feature = "benchmark")]
 pub mod benchmarks;
@@ -43,7 +42,15 @@ pub use context::{
 pub use overwrite::{UdpOverwriteChecksum, UdpOverwriteError, UdpOverwriter};
 pub use receive::process_ethernet_frame;
 pub use state::IpsState;
+pub use tcp_flow::{
+    InboundSegmentClass, IpsTcpFlowTable, IpsTcpFlowTableConfig, TcpEditRecord, TcpFlowDirection,
+    TcpFlowKey, TcpFlowState,
+};
+pub use tcp_overwrite::{
+    TcpForwardAction, TcpOverwriteChecksum, TcpOverwriteError, TcpOverwriter, TcpPayloadEdit,
+};
 pub use view::{
-    FragmentEvent, IpFragmentMetadata, IpFragmentInfo, PayloadSliceView, ReceivedUdpDatagramView,
-    ReassemblyOutcome, UdpHeaderView,
+    EthernetHeaderView, FragmentEvent, IpFragmentMetadata, IpFragmentInfo, PayloadSliceView,
+    ReceivedTcpSegmentView, ReceivedUdpDatagramView, ReassemblyOutcome, TcpHeaderView,
+    UdpHeaderView,
 };

@@ -11,25 +11,29 @@ use alloc::vec::Vec;
 use netstack3_base::StrongDeviceIdentifier;
 use packet::{Buffer as _, BufferMut, GrowBuffer as _};
 
-use crate::view::ReceivedUdpDatagramView;
+use crate::view::{ReceivedTcpSegmentView, ReceivedUdpDatagramView};
 
-/// Errors encountered when delivering a datagram to Layer 7.
+/// Errors encountered when delivering to Layer 7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpsReceiveError {
     /// The IPS receive queue or handler rejected the datagram.
     QueueFull,
 }
 
-/// Bindings context for zero-copy UDP datagram delivery to Layer 7.
+/// Bindings context for zero-copy IPS delivery to Layer 7.
 pub trait IpsReceiveBindingsContext<D: StrongDeviceIdentifier> {
     /// Delivers a reassembled or aborted (RFC 5722 overlap) UDP datagram view.
-    ///
-    /// The bindings implementation takes ownership of the underlying frame
-    /// buffers via `view`. No payload bytes are copied before this call.
     fn receive_udp_datagram(
         &mut self,
         device_id: &D,
         view: ReceivedUdpDatagramView,
+    ) -> Result<(), IpsReceiveError>;
+
+    /// Delivers a reassembled or aborted TCP segment view.
+    fn receive_tcp_segment(
+        &mut self,
+        device_id: &D,
+        view: ReceivedTcpSegmentView,
     ) -> Result<(), IpsReceiveError>;
 }
 
