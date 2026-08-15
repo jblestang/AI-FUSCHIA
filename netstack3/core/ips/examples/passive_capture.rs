@@ -34,8 +34,8 @@ mod linux {
     };
     use netstack3_base::{DeviceIdentifier, StrongDeviceIdentifier, WeakDeviceIdentifier};
     use netstack3_ips::{
-        IpsReceiveBindingsContext, IpsReceiveError, IpsState, ReceivedTcpSegmentView,
-        ReceivedUdpDatagramView, process_ethernet_frame,
+        diagnose_ingress_rejection, IpsReceiveBindingsContext, IpsReceiveError, IpsState,
+        ReceivedTcpSegmentView, ReceivedUdpDatagramView, process_ethernet_frame,
     };
     use packet::Buf;
 
@@ -126,20 +126,31 @@ mod linux {
     }
 
     fn log_rejected_frame(bytes: &[u8]) {
-        let ethertype = bytes.get(12..14).map(|s| u16::from_be_bytes([s[0], s[1]]));
         let hex_limit = bytes.len().min(64);
         let hex: String = bytes[..hex_limit]
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect::<Vec<_>>()
             .join("");
-        let truncated = if bytes.len() > hex_limit { " (truncated)" } else { "" };
-        match ethertype {
-            Some(et) => println!(
-                "REJECTED len={} ethertype=0x{et:04x} hex={hex}{truncated}",
-                bytes.len()
-            ),
-            None => println!("REJECTED len={} hex={hex}{truncated}", bytes.len()),
+        let hex_suffix = if bytes.len() > hex_limit {
+            " hex_truncated=true"
+        } else {
+            ""
+        };
+
+        match diagnose_ingress_rejection(bytes) {
+            Some(diag) => {
+                println!(
+                    "REJECTED len={} {diag} hex={hex}{hex_suffix}",
+                    bytes.len()
+                );
+            }
+            None => {
+                println!(
+                    "REJECTED len={} stage=unknown reason=\"accepted by diagnose but rejected by process_ethernet_frame\" hex={hex}{hex_suffix}",
+                    bytes.len()
+                );
+            }
         }
     }
 

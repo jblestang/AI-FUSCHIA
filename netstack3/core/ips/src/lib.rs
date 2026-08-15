@@ -17,6 +17,7 @@ extern crate alloc;
 mod context;
 mod frame_store;
 mod fragment;
+mod ingress_diagnose;
 mod overwrite;
 mod receive;
 mod state;
@@ -40,6 +41,9 @@ pub use context::{
     TryIntoIpsFrame,
 };
 pub use overwrite::{UdpOverwriteChecksum, UdpOverwriteError, UdpOverwriter};
+pub use ingress_diagnose::{
+    diagnose_ingress_rejection, IngressRejectionDiagnosis, IngressRejectionStage,
+};
 pub use receive::process_ethernet_frame;
 pub use state::IpsState;
 pub use tcp_flow::{
