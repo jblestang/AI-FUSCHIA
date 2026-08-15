@@ -5,14 +5,16 @@ use net_types::ip::Ipv4Addr;
 use netstack3_ips::fragment::{add_fragment, ipv4_key, store_fragment};
 use netstack3_ips::state::{AssemblyProgress, IpsFragmentCache};
 use packet::Buf;
-use packet_formats::ip::IpProto;
+use packet_formats::ip::{FragmentOffset, IpProto};
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 4 {
         return;
     }
 
-    let offset = u16::from_be_bytes([data[0], data[1]]) & 0x1FFF;
+    let offset = FragmentOffset::new(u16::from_be_bytes([data[0], data[1]]))
+        .map(|f| f.into_raw())
+        .unwrap_or(0);
     let flags = data[2];
     let body_len = usize::from(data[3]).min(256);
     let m_flag = flags & 0x01 != 0;

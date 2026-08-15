@@ -18,12 +18,10 @@ use packet_formats::udp::HEADER_BYTES;
 use crate::view::{
     IpFragmentInfo, ReceivedUdpDatagramView, ReassemblyOutcome, UdpHeaderView,
 };
-
-const IPV4_TOTAL_LEN_OFFSET: usize = 2;
-const IPV4_FLAGS_FRAG_OFFSET: usize = 6;
-const IPV4_HDR_CHECKSUM_OFFSET: usize = 10;
-const UDP_LENGTH_OFFSET: usize = 4;
-const UDP_CHECKSUM_OFFSET: usize = 6;
+use crate::wire::{
+    IPV4_FLAGS_FRAG_OFFSET, IPV4_HDR_CHECKSUM_OFFSET, IPV4_TOTAL_LEN_OFFSET, UDP_CHECKSUM_OFFSET,
+    UDP_LENGTH_OFFSET,
+};
 
 /// How [`UdpOverwriter`] updates IPv4/UDP checksum fields after a rewrite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -643,18 +641,17 @@ mod tests {
     }
 
     fn parsed_ipv4_fields(frame: &[u8]) -> (u16, bool, u16) {
+        use packet::ParsablePacket;
+        use packet_formats::ipv4::{Ipv4Header, Ipv4PacketRaw};
+
         let ip_offset = ETHERNET_HDR_LEN_NO_TAG;
         let ip_total = u16::from_be_bytes([
             frame[ip_offset + IPV4_TOTAL_LEN_OFFSET],
             frame[ip_offset + IPV4_TOTAL_LEN_OFFSET + 1],
         ]);
-        let flags_frag = u16::from_be_bytes([
-            frame[ip_offset + IPV4_FLAGS_FRAG_OFFSET],
-            frame[ip_offset + IPV4_FLAGS_FRAG_OFFSET + 1],
-        ]);
-        let mf = flags_frag & 0x2000 != 0;
-        let frag_off = flags_frag & 0x1FFF;
-        (ip_total, mf, frag_off)
+        let mut bytes = &frame[ip_offset..];
+        let raw = Ipv4PacketRaw::parse(&mut bytes, ()).expect("IPv4 raw packet");
+        (ip_total, raw.mf_flag(), raw.fragment_offset().into_raw())
     }
 
     #[test]

@@ -23,7 +23,7 @@ use crate::state::{
 };
 use crate::view::{
     IpFragmentInfo, IpFragmentMetadata, ReceivedTcpSegmentView, ReceivedUdpDatagramView,
-    ReassemblyOutcome, TcpHeaderView, UdpHeaderView, parse_tcp_header,
+    ReassemblyOutcome, TcpHeaderView, UdpHeaderView, parse_tcp_header, parse_udp_header,
 };
 
 fn deliver_udp_to_l7<D, BC>(
@@ -239,20 +239,14 @@ where
     BC: IpsReceiveBindingsContext<D>,
 {
     let frame_len = frame.as_ref().len();
-    let payload_start = body_start + packet_formats::udp::HEADER_BYTES;
+    let udp_hdr = match parse_udp_header(frame.as_ref(), 0, body_start) {
+        Some(hdr) => hdr,
+        None => return Err(frame),
+    };
+    let payload_start = udp_hdr.header_range.end;
     if frame_len < payload_start {
         return Err(frame);
     }
-    let header_range = body_start..payload_start;
-
-    let hdr = {
-        let bytes = &frame.as_ref()[header_range.clone()];
-        (
-            u16::from_be_bytes([bytes[0], bytes[1]]),
-            u16::from_be_bytes([bytes[2], bytes[3]]),
-            u16::from_be_bytes([bytes[4], bytes[5]]),
-        )
-    };
     let view = ReceivedUdpDatagramView::new(
         alloc::vec![frame],
         alloc::vec![IpFragmentInfo {
@@ -267,13 +261,7 @@ where
             reassembly_outcome: ReassemblyOutcome::NotApplicable,
             ..Default::default()
         },
-        Some(UdpHeaderView {
-            src_port: hdr.0,
-            dst_port: hdr.1,
-            length: hdr.2,
-            eth_frame_index: 0,
-            header_range,
-        }),
+        Some(udp_hdr),
         alloc::vec![(0, payload_start..frame_len)],
         IpAddr::V4(src),
         IpAddr::V4(dst),
@@ -347,17 +335,11 @@ where
     BC: IpsReceiveBindingsContext<D>,
 {
     let frame_len = frame.as_ref().len();
-    let payload_start = body_start + packet_formats::udp::HEADER_BYTES;
-    let header_range = body_start..payload_start;
-
-    let hdr = {
-        let bytes = &frame.as_ref()[header_range.clone()];
-        (
-            u16::from_be_bytes([bytes[0], bytes[1]]),
-            u16::from_be_bytes([bytes[2], bytes[3]]),
-            u16::from_be_bytes([bytes[4], bytes[5]]),
-        )
+    let udp_hdr = match parse_udp_header(frame.as_ref(), 0, body_start) {
+        Some(hdr) => hdr,
+        None => return Err(frame),
     };
+    let payload_start = udp_hdr.header_range.end;
     let view = ReceivedUdpDatagramView::new(
         alloc::vec![frame],
         alloc::vec![IpFragmentInfo {
@@ -372,13 +354,7 @@ where
             reassembly_outcome: ReassemblyOutcome::NotApplicable,
             ..Default::default()
         },
-        Some(UdpHeaderView {
-            src_port: hdr.0,
-            dst_port: hdr.1,
-            length: hdr.2,
-            eth_frame_index: 0,
-            header_range,
-        }),
+        Some(udp_hdr),
         alloc::vec![(0, payload_start..frame_len)],
         IpAddr::V6(src),
         IpAddr::V6(dst),
@@ -505,20 +481,18 @@ fn build_udp_views(
 
         if offset == 0 {
             if body.len() >= packet_formats::udp::HEADER_BYTES {
-                let udp_start = body.start;
-                let header_range = udp_start..udp_start + packet_formats::udp::HEADER_BYTES;
-                let frame = &eth_frames[info.eth_frame_index];
-                let hdr = &frame.as_ref()[udp_start..udp_start + packet_formats::udp::HEADER_BYTES];
-                udp_header = Some(UdpHeaderView {
-                    src_port: u16::from_be_bytes([hdr[0], hdr[1]]),
-                    dst_port: u16::from_be_bytes([hdr[2], hdr[3]]),
-                    length: u16::from_be_bytes([hdr[4], hdr[5]]),
-                    eth_frame_index: info.eth_frame_index,
-                    header_range,
-                });
-                let payload_start = udp_start + packet_formats::udp::HEADER_BYTES;
-                if payload_start < body.end {
-                    payload_parts.push((info.eth_frame_index, payload_start..body.end));
+                if let Some(hdr) =
+                    parse_udp_header(
+                        eth_frames[info.eth_frame_index].as_ref(),
+                        info.eth_frame_index,
+                        body.start,
+                    )
+                {
+                    let payload_start = hdr.header_range.end;
+                    udp_header = Some(hdr);
+                    if payload_start < body.end {
+                        payload_parts.push((info.eth_frame_index, payload_start..body.end));
+                    }
                 }
             }
         } else if body.start < body.end {

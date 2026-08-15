@@ -23,6 +23,7 @@ mod state;
 mod tcp_flow;
 mod tcp_overwrite;
 mod view;
+mod wire;
 
 #[cfg(feature = "benchmark")]
 pub mod benchmarks;

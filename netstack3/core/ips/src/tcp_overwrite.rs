@@ -17,21 +17,11 @@ use packet_formats::ipv4::HDR_PREFIX_LEN;
 
 use crate::tcp_flow::{InboundSegmentClass, TcpFlowDirection, TcpFlowState};
 use crate::view::{ReceivedTcpSegmentView, ReassemblyOutcome};
-
-const IPV4_TOTAL_LEN_OFFSET: usize = 2;
-const IPV4_FLAGS_FRAG_OFFSET: usize = 6;
-const IPV4_HDR_CHECKSUM_OFFSET: usize = 10;
-const TCP_SEQ_OFFSET: usize = 4;
-const TCP_ACK_OFFSET: usize = 8;
-const TCP_FLAGS_OFFSET: usize = 13;
-const TCP_URG_OFFSET: usize = 18;
-const TCP_CHECKSUM_OFFSET: usize = 16;
-const TCP_FLAG_FIN: u8 = 0x01;
-const TCP_FLAG_PSH: u8 = 0x08;
-const TCP_FLAG_URG: u8 = 0x20;
-const TCP_OPTION_KIND_NOP: u8 = 1;
-const TCP_OPTION_KIND_SACK_PERMITTED: u8 = 4;
-const TCP_OPTION_KIND_SACK: u8 = 5;
+use crate::wire::{
+    IPV4_FLAGS_FRAG_OFFSET, IPV4_HDR_CHECKSUM_OFFSET, IPV4_TOTAL_LEN_OFFSET, TCP_ACK_OFFSET,
+    TCP_CHECKSUM_OFFSET, TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_PSH, TCP_FLAG_URG, TCP_FLAGS_OFFSET,
+    TCP_HDR_PREFIX_LEN, TCP_OPTION_KIND_NOP, TCP_OPTION_KIND_SACK, TCP_SEQ_OFFSET, TCP_URG_OFFSET,
+};
 
 /// How [`TcpOverwriter`] updates checksum fields after a rewrite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -420,10 +410,10 @@ fn rewrite_sack_options(
     flow: &TcpFlowState,
     dir: TcpFlowDirection,
 ) {
-    if data_offset <= 20 {
+    if data_offset <= TCP_HDR_PREFIX_LEN {
         return;
     }
-    let opts_start = tcp_start + 20;
+    let opts_start = tcp_start + TCP_HDR_PREFIX_LEN;
     let opts_end = tcp_start + data_offset;
     if opts_end > buf.len() {
         return;
@@ -564,18 +554,17 @@ mod tests {
     }
 
     fn parsed_ipv4_fields(frame: &[u8]) -> (u16, bool, u16) {
+        use packet::ParsablePacket;
+        use packet_formats::ipv4::{Ipv4Header, Ipv4PacketRaw};
+
         let ip_offset = ETHERNET_HDR_LEN_NO_TAG;
         let ip_total = u16::from_be_bytes([
             frame[ip_offset + IPV4_TOTAL_LEN_OFFSET],
             frame[ip_offset + IPV4_TOTAL_LEN_OFFSET + 1],
         ]);
-        let flags_frag = u16::from_be_bytes([
-            frame[ip_offset + IPV4_FLAGS_FRAG_OFFSET],
-            frame[ip_offset + IPV4_FLAGS_FRAG_OFFSET + 1],
-        ]);
-        let mf = flags_frag & 0x2000 != 0;
-        let frag_off = flags_frag & 0x1FFF;
-        (ip_total, mf, frag_off)
+        let mut bytes = &frame[ip_offset..];
+        let raw = Ipv4PacketRaw::parse(&mut bytes, ()).expect("IPv4 raw packet");
+        (ip_total, raw.mf_flag(), raw.fragment_offset().into_raw())
     }
 
     fn parsed_tcp_seq(frame: &[u8], tcp_start: usize) -> u32 {
@@ -588,7 +577,11 @@ mod tests {
     }
 
     fn parsed_tcp_data_offset(frame: &[u8], tcp_start: usize) -> u8 {
-        (frame[tcp_start + 12] >> 4) * 4
+        use crate::view::parse_tcp_header;
+
+        parse_tcp_header(frame, 0, tcp_start)
+            .map(|hdr| hdr.data_offset_bytes)
+            .unwrap_or(0)
     }
 
     fn parsed_tcp_ack(frame: &[u8], tcp_start: usize) -> u32 {
@@ -1171,9 +1164,9 @@ mod tests {
     fn rewrite_sack_options_translates_block_edges() {
         let tcp_start = 50usize;
         let mut frame = vec![0u8; 100];
-        frame[tcp_start + 12] = 0x80;
-        frame[tcp_start + 13] = 0x10;
-        frame[tcp_start + 20] = TCP_OPTION_KIND_SACK;
+        frame[tcp_start + TCP_FLAGS_OFFSET - 1] = 0x80;
+        frame[tcp_start + TCP_FLAGS_OFFSET] = TCP_FLAG_ACK;
+        frame[tcp_start + TCP_HDR_PREFIX_LEN] = TCP_OPTION_KIND_SACK;
         frame[tcp_start + 21] = 10;
         frame[tcp_start + 22..tcp_start + 26].copy_from_slice(&1010u32.to_be_bytes());
         frame[tcp_start + 26..tcp_start + 30].copy_from_slice(&1040u32.to_be_bytes());
@@ -1182,7 +1175,7 @@ mod tests {
         flow.apply_keep_edit(TcpFlowDirection::ClientToServer, 1000, 80, 40);
         rewrite_sack_options(&mut frame, tcp_start, 32, &flow, TcpFlowDirection::ServerToClient);
 
-        assert_eq!(frame[tcp_start + 20], TCP_OPTION_KIND_SACK);
+        assert_eq!(frame[tcp_start + TCP_HDR_PREFIX_LEN], TCP_OPTION_KIND_SACK);
         assert_eq!(frame[tcp_start + 21], 10);
         assert_eq!(
             u32::from_be_bytes(frame[tcp_start + 22..tcp_start + 26].try_into().unwrap()),
@@ -1198,49 +1191,61 @@ mod tests {
     fn adjust_tcp_flags_after_truncate_clears_urg_when_past_kept_payload() {
         let tcp_start = 50usize;
         let mut frame = vec![0u8; 80];
-        frame[tcp_start + 13] = 0x30; // ACK + URG
-        frame[tcp_start + 18] = 0;
-        frame[tcp_start + 19] = 40; // urgent pointer at byte 40
+        frame[tcp_start + TCP_FLAGS_OFFSET] = TCP_FLAG_ACK | TCP_FLAG_URG;
+        frame[tcp_start + TCP_URG_OFFSET] = 0;
+        frame[tcp_start + TCP_URG_OFFSET + 1] = 40; // urgent pointer at byte 40
 
         adjust_tcp_flags_after_truncate(&mut frame, tcp_start, 32, true);
-        assert_eq!(frame[tcp_start + 13] & TCP_FLAG_URG, 0);
-        assert_eq!([frame[tcp_start + 18], frame[tcp_start + 19]], [0, 0]);
+        assert_eq!(frame[tcp_start + TCP_FLAGS_OFFSET] & TCP_FLAG_URG, 0);
+        assert_eq!(
+            [
+                frame[tcp_start + TCP_URG_OFFSET],
+                frame[tcp_start + TCP_URG_OFFSET + 1],
+            ],
+            [0, 0]
+        );
     }
 
     #[test]
     fn adjust_tcp_flags_after_truncate_keeps_urg_inside_kept_prefix() {
         let tcp_start = 50usize;
         let mut frame = vec![0u8; 80];
-        frame[tcp_start + 13] = 0x30;
-        frame[tcp_start + 18] = 0;
-        frame[tcp_start + 19] = 16;
+        frame[tcp_start + TCP_FLAGS_OFFSET] = TCP_FLAG_ACK | TCP_FLAG_URG;
+        frame[tcp_start + TCP_URG_OFFSET] = 0;
+        frame[tcp_start + TCP_URG_OFFSET + 1] = 16;
 
         adjust_tcp_flags_after_truncate(&mut frame, tcp_start, 32, true);
-        assert_ne!(frame[tcp_start + 13] & TCP_FLAG_URG, 0);
-        assert_eq!([frame[tcp_start + 18], frame[tcp_start + 19]], [0, 16]);
+        assert_ne!(frame[tcp_start + TCP_FLAGS_OFFSET] & TCP_FLAG_URG, 0);
+        assert_eq!(
+            [
+                frame[tcp_start + TCP_URG_OFFSET],
+                frame[tcp_start + TCP_URG_OFFSET + 1],
+            ],
+            [0, 16]
+        );
     }
 
     #[test]
     fn adjust_tcp_flags_after_truncate_clears_psh_and_fin_when_payload_emptied() {
         let tcp_start = 50usize;
         let mut frame = vec![0u8; 80];
-        frame[tcp_start + 13] = TCP_FLAG_FIN | TCP_FLAG_PSH | 0x10; // FIN + PSH + ACK
+        frame[tcp_start + TCP_FLAGS_OFFSET] = TCP_FLAG_FIN | TCP_FLAG_PSH | TCP_FLAG_ACK;
 
         adjust_tcp_flags_after_truncate(&mut frame, tcp_start, 0, true);
-        let flags = frame[tcp_start + 13];
+        let flags = frame[tcp_start + TCP_FLAGS_OFFSET];
         assert_eq!(flags & TCP_FLAG_FIN, 0);
         assert_eq!(flags & TCP_FLAG_PSH, 0);
-        assert_ne!(flags & 0x10, 0, "ACK must be preserved");
+        assert_ne!(flags & TCP_FLAG_ACK, 0, "ACK must be preserved");
     }
 
     #[test]
     fn adjust_tcp_flags_after_truncate_preserves_fin_without_truncation() {
         let tcp_start = 50usize;
         let mut frame = vec![0u8; 80];
-        frame[tcp_start + 13] = TCP_FLAG_FIN | 0x10; // FIN + ACK
+        frame[tcp_start + TCP_FLAGS_OFFSET] = TCP_FLAG_FIN | TCP_FLAG_ACK;
 
         adjust_tcp_flags_after_truncate(&mut frame, tcp_start, 0, false);
-        assert_ne!(frame[tcp_start + 13] & TCP_FLAG_FIN, 0);
+        assert_ne!(frame[tcp_start + TCP_FLAGS_OFFSET] & TCP_FLAG_FIN, 0);
     }
 
     #[test]
@@ -1248,7 +1253,7 @@ mod tests {
         let mut view = build_tcp_segment(&[0xAA; 64], 1000);
         let tcp_start = view.tcp_header().unwrap().header_range.start;
         if let Some(buf) = view.eth_frame_buf_mut(0) {
-            buf[tcp_start + 13] |= TCP_FLAG_PSH;
+            buf[tcp_start + TCP_FLAGS_OFFSET] |= TCP_FLAG_PSH;
         }
 
         let mut flow = TcpFlowState::default();
@@ -1257,7 +1262,7 @@ mod tests {
             .expect("drop all payload");
 
         let frame = view.eth_frames().next().unwrap();
-        assert_eq!(frame[tcp_start + 13] & TCP_FLAG_PSH, 0);
+        assert_eq!(frame[tcp_start + TCP_FLAGS_OFFSET] & TCP_FLAG_PSH, 0);
     }
 
     #[test]
@@ -1265,9 +1270,9 @@ mod tests {
         let mut view = build_tcp_segment(&[0xAA; 64], 1000);
         let tcp_start = view.tcp_header().unwrap().header_range.start;
         if let Some(buf) = view.eth_frame_buf_mut(0) {
-            buf[tcp_start + 13] |= TCP_FLAG_URG;
-            buf[tcp_start + 18] = 0;
-            buf[tcp_start + 19] = 48;
+            buf[tcp_start + TCP_FLAGS_OFFSET] |= TCP_FLAG_URG;
+            buf[tcp_start + TCP_URG_OFFSET] = 0;
+            buf[tcp_start + TCP_URG_OFFSET + 1] = 48;
         }
 
         let mut flow = TcpFlowState::default();
@@ -1276,7 +1281,7 @@ mod tests {
             .expect("edit");
 
         let frame = view.eth_frames().next().unwrap();
-        assert_eq!(frame[tcp_start + 13] & TCP_FLAG_URG, 0);
+        assert_eq!(frame[tcp_start + TCP_FLAGS_OFFSET] & TCP_FLAG_URG, 0);
     }
 
     #[test]

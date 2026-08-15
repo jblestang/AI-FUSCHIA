@@ -8,13 +8,17 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use net_types::ethernet::Mac;
-use net_types::ip::{IpAddr, Ipv4Addr, Ipv6Addr};
-use packet::{Buf, FragmentedByteSlice, ParseBuffer};
+use net_types::ip::{IpAddr, IpVersionMarker, Ipv4, Ipv4Addr, Ipv6Addr};
+use packet::{Buf, FragmentedByteSlice, ParseBuffer, ParsablePacket};
 use packet_formats::ethernet::{
     EtherType, EthernetFrame, EthernetFrameLengthCheck, ETHERNET_HDR_LEN_NO_TAG,
 };
+use packet_formats::tcp::{TcpParseArgs, TcpSegment};
+use packet_formats::testutil::ForceSkipChecksumValidation;
+use packet_formats::udp::{UdpPacketRaw, HEADER_BYTES as UDP_HEADER_BYTES};
 
 use crate::frame_store::EthFrameStore;
+use crate::wire::{self, UDP_LENGTH_OFFSET};
 
 /// Metadata describing IP fragment reception and reassembly per RFC 5722.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -537,43 +541,68 @@ fn ethernet_header_for_frames(
     parse_ethernet_header(frame.as_ref(), frame_index)
 }
 
+/// Parses a UDP header from frame bytes; returns None if too short.
+pub(crate) fn parse_udp_header(
+    frame: &[u8],
+    eth_frame_index: usize,
+    udp_start: usize,
+) -> Option<UdpHeaderView> {
+    let header_range = udp_start..udp_start + UDP_HEADER_BYTES;
+    if frame.len() < header_range.end {
+        return None;
+    }
+    let mut bytes = &frame[header_range.clone()];
+    let raw = UdpPacketRaw::parse(&mut bytes, IpVersionMarker::<Ipv4>::default()).ok()?;
+    if frame.len() < header_range.end {
+        return None;
+    }
+    let hdr_bytes = &frame[header_range.clone()];
+    let length = u16::from_be_bytes([
+        hdr_bytes[UDP_LENGTH_OFFSET],
+        hdr_bytes[UDP_LENGTH_OFFSET + 1],
+    ]);
+    Some(UdpHeaderView {
+        src_port: raw.src_port().map(|p| p.get()).unwrap_or(0),
+        dst_port: raw.dst_port()?.get(),
+        length,
+        eth_frame_index,
+        header_range,
+    })
+}
+
 /// Parses a TCP header from frame bytes; returns None if too short.
 pub(crate) fn parse_tcp_header(
     frame: &[u8],
     eth_frame_index: usize,
     tcp_start: usize,
 ) -> Option<TcpHeaderView> {
-    if frame.len() < tcp_start + 20 {
+    if frame.len() < tcp_start + wire::TCP_HDR_PREFIX_LEN {
         return None;
     }
-    let data_offset = (frame[tcp_start + 12] >> 4) as usize * 4;
-    if frame.len() < tcp_start + data_offset {
+    let mut bytes = &frame[tcp_start..];
+    let args = TcpParseArgs::with_context(
+        Ipv4Addr::new([0, 0, 0, 0]),
+        Ipv4Addr::new([0, 0, 0, 0]),
+        ForceSkipChecksumValidation(true),
+    );
+    let segment = TcpSegment::parse(&mut bytes, args).ok()?;
+    let header_len = segment.header_len();
+    if frame.len() < tcp_start + header_len {
         return None;
     }
-    let flags = frame[tcp_start + 13];
     Some(TcpHeaderView {
-        src_port: u16::from_be_bytes([frame[tcp_start], frame[tcp_start + 1]]),
-        dst_port: u16::from_be_bytes([frame[tcp_start + 2], frame[tcp_start + 3]]),
-        seq_num: u32::from_be_bytes([
-            frame[tcp_start + 4],
-            frame[tcp_start + 5],
-            frame[tcp_start + 6],
-            frame[tcp_start + 7],
-        ]),
-        ack_num: u32::from_be_bytes([
-            frame[tcp_start + 8],
-            frame[tcp_start + 9],
-            frame[tcp_start + 10],
-            frame[tcp_start + 11],
-        ]),
-        ack_flag: flags & 0x10 != 0,
-        syn_flag: flags & 0x02 != 0,
-        fin_flag: flags & 0x01 != 0,
-        rst_flag: flags & 0x04 != 0,
-        data_offset_bytes: u8::try_from(data_offset).unwrap_or(255),
-        window: u16::from_be_bytes([frame[tcp_start + 14], frame[tcp_start + 15]]),
+        src_port: segment.src_port().get(),
+        dst_port: segment.dst_port().get(),
+        seq_num: segment.seq_num(),
+        ack_num: segment.ack_num().unwrap_or(0),
+        ack_flag: segment.ack_num().is_some(),
+        syn_flag: segment.syn(),
+        fin_flag: segment.fin(),
+        rst_flag: segment.rst(),
+        data_offset_bytes: u8::try_from(header_len).unwrap_or(u8::MAX),
+        window: segment.window_size(),
         eth_frame_index,
-        header_range: tcp_start..tcp_start + data_offset,
+        header_range: tcp_start..tcp_start + header_len,
     })
 }
 
