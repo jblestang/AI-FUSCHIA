@@ -54,7 +54,8 @@ pub use tcp_overwrite::{
     TcpForwardAction, TcpOverwriteChecksum, TcpOverwriteError, TcpOverwriter, TcpPayloadEdit,
 };
 pub use view::{
-    EthernetHeaderView, FragmentEvent, IcmpHeaderView, IpFragmentMetadata, IpFragmentInfo,
-    PayloadSliceView, ReceivedIcmpMessageView, ReceivedTcpSegmentView, ReceivedUdpDatagramView,
-    ReassemblyOutcome, TcpHeaderView, UdpHeaderView,
+    EthernetHeaderView, FragmentEvent, IgmpHeaderView, IcmpHeaderView, IpFragmentMetadata,
+    IpFragmentInfo, PayloadSliceView, ReceivedIcmpMessageView, ReceivedIgmpMessageView,
+    ReceivedTcpSegmentView, ReceivedUdpDatagramView, ReassemblyOutcome, TcpHeaderView,
+    UdpHeaderView,
 };

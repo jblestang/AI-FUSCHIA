@@ -126,7 +126,14 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for PayloadIterationAgent {
         ) -> Result<(), IpsReceiveError> {
             Ok(())
         }
-}
+
+        fn receive_igmp_message(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            _view: netstack3_ips::ReceivedIgmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }}
 
 fn build_ipv4_udp_fragment(
     fragment_offset: FragmentOffset,

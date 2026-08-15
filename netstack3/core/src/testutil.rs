@@ -1424,7 +1424,14 @@ impl IpsReceiveBindingsContext<DeviceId<Self>> for FakeBindingsCtx {
         ) -> Result<(), IpsReceiveError> {
             Ok(())
         }
-}
+
+        fn receive_igmp_message(
+            &mut self,
+            _device_id: &DeviceId<Self>,
+            _view: netstack3_ips::ReceivedIgmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }}
 
 impl UdpBindingsTypes for FakeBindingsCtx {
     type ExternalData<I: Ip> = ();

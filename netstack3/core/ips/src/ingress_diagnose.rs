@@ -16,12 +16,13 @@ use packet_formats::ip::{IpProto, Ipv4Proto, Ipv6Proto};
 use packet_formats::ipv4::{Ipv4Header, Ipv4Packet};
 use packet_formats::ipv6::{Ipv6Header, Ipv6Packet};
 
-use crate::view::{parse_icmp_header, parse_tcp_header, parse_udp_header};
+use crate::view::{parse_icmp_header, parse_igmp_header, parse_tcp_header, parse_udp_header};
 
 enum DiagnoseIpv4L4 {
     Udp,
     Tcp,
     Icmp,
+    Igmp,
 }
 
 /// One IPS ingress rejection stage (matches `process_ethernet_frame` error paths).
@@ -39,6 +40,8 @@ pub enum IngressRejectionStage {
     UdpHeaderParse,
     /// ICMP header could not be parsed (IPv4 or IPv6 path).
     IcmpHeaderParse,
+    /// IGMP header could not be parsed (IPv4 path).
+    IgmpHeaderParse,
     /// Frame ends before the UDP payload start (IPv4 only).
     FrameTruncated,
     /// TCP header could not be parsed (IPv4 only).
@@ -61,6 +64,7 @@ impl IngressRejectionStage {
             Self::UnsupportedIpv4Protocol => "unsupported_ipv4_protocol",
             Self::UdpHeaderParse => "udp_header_parse",
             Self::IcmpHeaderParse => "icmp_header_parse",
+            Self::IgmpHeaderParse => "igmp_header_parse",
             Self::FrameTruncated => "frame_truncated",
             Self::TcpHeaderParse => "tcp_header_parse",
             Self::Ipv6Parse => "ipv6_parse",
@@ -74,9 +78,10 @@ impl IngressRejectionStage {
             Self::EthernetParse => "malformed or truncated Ethernet header",
             Self::UnsupportedEthertype => "EtherType is not IPv4 (0x0800) or IPv6 (0x86DD)",
             Self::Ipv4Parse => "malformed or truncated IPv4 header",
-            Self::UnsupportedIpv4Protocol => "IPv4 protocol is not UDP, TCP, or ICMP",
+            Self::UnsupportedIpv4Protocol => "IPv4 protocol is not UDP, TCP, ICMP, or IGMP",
             Self::UdpHeaderParse => "malformed or truncated UDP header",
             Self::IcmpHeaderParse => "malformed or truncated ICMP header",
+            Self::IgmpHeaderParse => "malformed or truncated IGMP header",
             Self::FrameTruncated => "frame shorter than UDP header + payload start",
             Self::TcpHeaderParse => "malformed or truncated TCP header",
             Self::Ipv6Parse => "malformed or truncated IPv6 header",
@@ -227,6 +232,7 @@ fn diagnose_ipv4(
             Ipv4Proto::Proto(IpProto::Udp) => DiagnoseIpv4L4::Udp,
             Ipv4Proto::Proto(IpProto::Tcp) => DiagnoseIpv4L4::Tcp,
             Ipv4Proto::Icmp => DiagnoseIpv4L4::Icmp,
+            Ipv4Proto::Igmp => DiagnoseIpv4L4::Igmp,
             other => {
                 diag.stage = IngressRejectionStage::UnsupportedIpv4Protocol;
                 diag.reason = diag.stage.default_reason();
@@ -255,13 +261,14 @@ fn diagnose_ipv4(
         DiagnoseIpv4L4::Udp => IpProto::Udp.into(),
         DiagnoseIpv4L4::Tcp => IpProto::Tcp.into(),
         DiagnoseIpv4L4::Icmp => Ipv4Proto::Icmp.into(),
+        DiagnoseIpv4L4::Igmp => Ipv4Proto::Igmp.into(),
     });
 
     let fragmented = mf || offset != 0;
     if fragmented {
-        return if matches!(l4, DiagnoseIpv4L4::Icmp) {
+        return if matches!(l4, DiagnoseIpv4L4::Icmp | DiagnoseIpv4L4::Igmp) {
             diag.stage = IngressRejectionStage::UnsupportedIpv4Protocol;
-            diag.reason = "fragmented ICMP is not supported on ingress";
+            diag.reason = "fragmented ICMP/IGMP is not supported on ingress";
             Some(diag.clone())
         } else {
             None
@@ -299,6 +306,14 @@ fn diagnose_ipv4(
         DiagnoseIpv4L4::Icmp => {
             if parse_icmp_header(frame, 0, body_start).is_none() {
                 diag.stage = IngressRejectionStage::IcmpHeaderParse;
+                diag.reason = diag.stage.default_reason();
+                return Some(diag.clone());
+            }
+            None
+        }
+        DiagnoseIpv4L4::Igmp => {
+            if parse_igmp_header(frame, 0, body_start).is_none() {
+                diag.stage = IngressRejectionStage::IgmpHeaderParse;
                 diag.reason = diag.stage.default_reason();
                 return Some(diag.clone());
             }
@@ -445,6 +460,14 @@ mod tests {
         ) -> Result<(), IpsReceiveError> {
             Ok(())
         }
+
+        fn receive_igmp_message(
+            &mut self,
+            _device: &FakeDeviceId,
+            _view: crate::view::ReceivedIgmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
     }
 
     fn assert_diagnosis_matches_rejection(frame: Buf<Vec<u8>>) {
@@ -513,14 +536,32 @@ mod tests {
         let igmp = {
             let ip = Ipv4PacketBuilder::new(REMOTE, LOCAL, 64, Ipv4Proto::Igmp);
             let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
-            Buf::new(vec![0x11, 0x02, 0x00, 0x00], ..)
+            // IGMPv3 Membership Report (type 0x22) minimal prefix + 8-byte fixed header.
+            Buf::new(
+                vec![0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00],
+                ..,
+            )
                 .wrap_in(ip)
                 .wrap_in(eth)
                 .serialize_vec_outer(&mut NetworkSerializationContext::default())
                 .unwrap()
                 .into_inner()
         };
-        assert_diagnosis_matches_rejection(igmp);
+        let igmp_bytes = igmp.as_ref().to_vec();
+        assert!(diagnose_ingress_rejection(&igmp_bytes).is_none());
+        assert_diagnosis_matches_rejection(Buf::new(igmp_bytes, ..));
+
+        let unknown_l4 = {
+            let ip = Ipv4PacketBuilder::new(REMOTE, LOCAL, 64, Ipv4Proto::from(47));
+            let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
+            Buf::new(vec![0x01, 0x02, 0x03, 0x04], ..)
+                .wrap_in(ip)
+                .wrap_in(eth)
+                .serialize_vec_outer(&mut NetworkSerializationContext::default())
+                .unwrap()
+                .into_inner()
+        };
+        assert_diagnosis_matches_rejection(unknown_l4);
 
         let truncated_udp = {
             let udp = UdpPacketBuilder::new(REMOTE, LOCAL, Some(REMOTE_PORT), LOCAL_PORT);

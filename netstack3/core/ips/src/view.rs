@@ -638,6 +638,120 @@ impl<'a> IcmpPayloadSliceView<'a> {
     }
 }
 
+/// Minimum IGMP header prefix length (type, max resp code, checksum) per RFC 3376.
+pub const IGMP_HEADER_PREFIX_LEN: usize = 4;
+
+/// Parsed IGMP header fields and their location within a stored frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgmpHeaderView {
+    /// IGMP message type (e.g. 0x22 = IGMPv3 Membership Report).
+    pub msg_type: u8,
+    /// Max Response Code field (meaningful for queries; zero in reports).
+    pub max_resp_code: u8,
+    /// Index into [`ReceivedIgmpMessageView::eth_frames`].
+    pub eth_frame_index: usize,
+    /// Byte range of the 4-byte IGMP header prefix within the frame buffer.
+    pub header_range: Range<usize>,
+}
+
+/// Zero-copy view of a received IGMP message for IPS analysis.
+pub struct ReceivedIgmpMessageView {
+    frames: EthFrameStore,
+    ip_fragments: Vec<IpFragmentInfo>,
+    fragment_metadata: IpFragmentMetadata,
+    ethernet_header: Option<EthernetHeaderView>,
+    igmp_header: Option<IgmpHeaderView>,
+    payload_parts: Vec<PayloadPart>,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+}
+
+impl ReceivedIgmpMessageView {
+    pub(crate) fn new(
+        eth_frames: Vec<Buf<Vec<u8>>>,
+        ip_fragments: Vec<IpFragmentInfo>,
+        fragment_metadata: IpFragmentMetadata,
+        igmp_header: Option<IgmpHeaderView>,
+        payload_parts: Vec<(usize, Range<usize>)>,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+    ) -> Self {
+        let ethernet_header = ethernet_header_for_frames(&eth_frames, &ip_fragments);
+        Self {
+            frames: EthFrameStore::from_frames(eth_frames),
+            ip_fragments,
+            fragment_metadata,
+            ethernet_header,
+            igmp_header,
+            payload_parts: payload_parts
+                .into_iter()
+                .map(|(eth_frame_index, range)| PayloadPart { eth_frame_index, range })
+                .collect(),
+            src_ip,
+            dst_ip,
+        }
+    }
+
+    /// Source and destination IP addresses.
+    pub fn addrs(&self) -> (IpAddr, IpAddr) {
+        (self.src_ip, self.dst_ip)
+    }
+
+    pub fn ip_fragment_metadata(&self) -> &IpFragmentMetadata {
+        &self.fragment_metadata
+    }
+
+    pub fn ip_fragments(&self) -> &[IpFragmentInfo] {
+        &self.ip_fragments
+    }
+
+    pub fn eth_frames(&self) -> impl Iterator<Item = &[u8]> + '_ {
+        self.frames.eth_frames()
+    }
+
+    pub fn ethernet_header(&self) -> Option<&EthernetHeaderView> {
+        self.ethernet_header.as_ref()
+    }
+
+    /// Parsed IGMP header prefix (type, max resp code, checksum).
+    pub fn igmp_header(&self) -> Option<&IgmpHeaderView> {
+        self.igmp_header.as_ref()
+    }
+
+    /// IGMP message body after the 4-byte header prefix (zero-copy).
+    pub fn payload_slices(&self) -> IgmpPayloadSliceView<'_> {
+        IgmpPayloadSliceView { view: self }
+    }
+
+    pub fn src_ipv4(&self) -> Option<Ipv4Addr> {
+        match self.src_ip {
+            IpAddr::V4(v4) => Some(v4),
+            IpAddr::V6(_) => None,
+        }
+    }
+}
+
+/// Iovec-style read-only IGMP body view (bytes after the 4-octet header prefix).
+pub struct IgmpPayloadSliceView<'a> {
+    view: &'a ReceivedIgmpMessageView,
+}
+
+impl<'a> IgmpPayloadSliceView<'a> {
+    pub fn len(&self) -> usize {
+        self.view.payload_parts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.view.payload_parts.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &'a [u8]> + 'a {
+        self.view.payload_parts.iter().map(|part| {
+            &self.view.frames.frames()[part.eth_frame_index].as_ref()[part.range.clone()]
+        })
+    }
+}
+
 /// Parses an untagged Ethernet header from frame bytes; returns None if too short.
 pub(crate) fn parse_ethernet_header(
     frame: &[u8],
@@ -747,6 +861,24 @@ pub(crate) fn parse_icmp_header(
     Some(IcmpHeaderView {
         msg_type: frame[icmp_start],
         code: frame[icmp_start + 1],
+        eth_frame_index,
+        header_range,
+    })
+}
+
+/// Parses an IGMP header prefix from frame bytes; returns None if too short.
+pub(crate) fn parse_igmp_header(
+    frame: &[u8],
+    eth_frame_index: usize,
+    igmp_start: usize,
+) -> Option<IgmpHeaderView> {
+    let header_range = igmp_start..igmp_start + IGMP_HEADER_PREFIX_LEN;
+    if frame.len() < header_range.end {
+        return None;
+    }
+    Some(IgmpHeaderView {
+        msg_type: frame[igmp_start],
+        max_resp_code: frame[igmp_start + 1],
         eth_frame_index,
         header_range,
     })

@@ -37,7 +37,14 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for FuzzHandler {
         ) -> Result<(), IpsReceiveError> {
             Ok(())
         }
-}
+
+        fn receive_igmp_message(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            _view: netstack3_ips::ReceivedIgmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }}
 
 fuzz_target!(|data: &[u8]| {
     let state = IpsState::new();

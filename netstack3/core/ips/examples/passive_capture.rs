@@ -35,8 +35,8 @@ mod linux {
     use netstack3_base::{DeviceIdentifier, StrongDeviceIdentifier, WeakDeviceIdentifier};
     use netstack3_ips::{
         diagnose_ingress_rejection, IpsReceiveBindingsContext, IpsReceiveError, IpsState,
-        ReceivedIcmpMessageView, ReceivedTcpSegmentView, ReceivedUdpDatagramView,
-        process_ethernet_frame,
+        ReceivedIcmpMessageView, ReceivedIgmpMessageView, ReceivedTcpSegmentView,
+        ReceivedUdpDatagramView, process_ethernet_frame,
     };
     use packet::Buf;
 
@@ -120,6 +120,7 @@ mod linux {
         udp_delivered: u64,
         tcp_delivered: u64,
         icmp_delivered: u64,
+        igmp_delivered: u64,
         l7_queue_full: u64,
     }
 
@@ -168,6 +169,10 @@ mod linux {
         fn note_icmp(&mut self, _view: &ReceivedIcmpMessageView) {
             self.stats.icmp_delivered += 1;
         }
+
+        fn note_igmp(&mut self, _view: &ReceivedIgmpMessageView) {
+            self.stats.igmp_delivered += 1;
+        }
     }
 
     impl IpsReceiveBindingsContext<CaptureDeviceId> for FlowAnalyzer {
@@ -195,6 +200,15 @@ mod linux {
             view: ReceivedIcmpMessageView,
         ) -> Result<(), IpsReceiveError> {
             self.note_icmp(&view);
+            Ok(())
+        }
+
+        fn receive_igmp_message(
+            &mut self,
+            _device_id: &CaptureDeviceId,
+            view: ReceivedIgmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            self.note_igmp(&view);
             Ok(())
         }
     }

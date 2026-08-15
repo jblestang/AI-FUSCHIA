@@ -67,7 +67,14 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for Capture {
         ) -> Result<(), IpsReceiveError> {
             Ok(())
         }
-}
+
+        fn receive_igmp_message(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            _view: netstack3_ips::ReceivedIgmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }}
 
 fn main() {
     let state = IpsState::new();

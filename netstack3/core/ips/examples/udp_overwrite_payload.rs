@@ -85,7 +85,14 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for SanitizingAgent {
         ) -> Result<(), IpsReceiveError> {
             Ok(())
         }
-}
+
+        fn receive_igmp_message(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            _view: netstack3_ips::ReceivedIgmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }}
 
 fn main() {
     let attack_payload = vec![ATTACK_MARKER; 64];

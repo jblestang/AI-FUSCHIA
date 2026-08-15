@@ -627,6 +627,14 @@ mod tests {
             ) -> Result<(), IpsReceiveError> {
                 Ok(())
             }
+
+            fn receive_igmp_message(
+                &mut self,
+                _device: &FakeDeviceId,
+                _view: crate::view::ReceivedIgmpMessageView,
+            ) -> Result<(), IpsReceiveError> {
+                Ok(())
+            }
         }
 
         let state = IpsState::new();

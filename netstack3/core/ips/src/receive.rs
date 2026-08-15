@@ -22,15 +22,30 @@ use crate::state::{
     assembly_metadata, ip_addr_v4, ip_addr_v6, AssemblyProgress, DatagramAssembly, IpsState,
 };
 use crate::view::{
-    IpFragmentInfo, IpFragmentMetadata, ReceivedIcmpMessageView, ReceivedTcpSegmentView,
-    ReceivedUdpDatagramView, ReassemblyOutcome, TcpHeaderView, UdpHeaderView, parse_icmp_header,
-    parse_tcp_header, parse_udp_header,
+    IpFragmentInfo, IpFragmentMetadata, ReceivedIcmpMessageView, ReceivedIgmpMessageView,
+    ReceivedTcpSegmentView, ReceivedUdpDatagramView, ReassemblyOutcome, TcpHeaderView,
+    UdpHeaderView, parse_icmp_header, parse_igmp_header, parse_tcp_header, parse_udp_header,
 };
 
 enum Ipv4IngressL4 {
     Udp,
     Tcp,
     Icmp,
+    Igmp,
+}
+
+fn deliver_igmp_to_l7<D, BC>(
+    state: &IpsState,
+    bindings_ctx: &mut BC,
+    device_id: &D,
+    view: ReceivedIgmpMessageView,
+) where
+    D: StrongDeviceIdentifier,
+    BC: IpsReceiveBindingsContext<D>,
+{
+    if bindings_ctx.receive_igmp_message(device_id, view) == Err(IpsReceiveError::QueueFull) {
+        state.record_l7_queue_full();
+    }
 }
 
 fn deliver_icmp_to_l7<D, BC>(
@@ -131,6 +146,7 @@ where
             Ipv4Proto::Proto(IpProto::Udp) => Ipv4IngressL4::Udp,
             Ipv4Proto::Proto(IpProto::Tcp) => Ipv4IngressL4::Tcp,
             Ipv4Proto::Icmp => Ipv4IngressL4::Icmp,
+            Ipv4Proto::Igmp => Ipv4IngressL4::Igmp,
             _ => return Err(frame),
         };
 
@@ -186,13 +202,24 @@ where
                 id,
                 body_start,
             ),
+            Ipv4IngressL4::Igmp => deliver_unfragmented_igmp_v4(
+                state,
+                bindings_ctx,
+                device_id,
+                frame,
+                ip_offset,
+                src,
+                dst,
+                id,
+                body_start,
+            ),
         };
     }
 
     let proto = match l4 {
         Ipv4IngressL4::Udp => IpProto::Udp,
         Ipv4IngressL4::Tcp => IpProto::Tcp,
-        Ipv4IngressL4::Icmp => return Err(frame),
+        Ipv4IngressL4::Icmp | Ipv4IngressL4::Igmp => return Err(frame),
     };
 
     let stored = store_fragment(
@@ -432,6 +459,56 @@ where
     );
 
     deliver_icmp_to_l7(state, bindings_ctx, device_id, view);
+    Ok(())
+}
+
+fn deliver_unfragmented_igmp_v4<D, BC>(
+    state: &IpsState,
+    bindings_ctx: &mut BC,
+    device_id: &D,
+    frame: Buf<Vec<u8>>,
+    ip_offset: usize,
+    src: net_types::ip::Ipv4Addr,
+    dst: net_types::ip::Ipv4Addr,
+    identification: u32,
+    body_start: usize,
+) -> Result<(), Buf<Vec<u8>>>
+where
+    D: StrongDeviceIdentifier,
+    BC: IpsReceiveBindingsContext<D>,
+{
+    let frame_len = frame.as_ref().len();
+    let igmp_hdr = match parse_igmp_header(frame.as_ref(), 0, body_start) {
+        Some(hdr) => hdr,
+        None => return Err(frame),
+    };
+    let payload_start = igmp_hdr.header_range.end;
+    let payload_parts = if payload_start < frame_len {
+        alloc::vec![(0, payload_start..frame_len)]
+    } else {
+        alloc::vec![]
+    };
+    let view = ReceivedIgmpMessageView::new(
+        alloc::vec![frame],
+        alloc::vec![IpFragmentInfo {
+            eth_frame_index: 0,
+            ip_packet_range: ip_offset..frame_len,
+            identification,
+            fragment_offset: 0,
+            more_fragments: false,
+            ip_body_range: body_start..frame_len,
+        }],
+        IpFragmentMetadata {
+            reassembly_outcome: ReassemblyOutcome::NotApplicable,
+            ..Default::default()
+        },
+        Some(igmp_hdr),
+        payload_parts,
+        IpAddr::V4(src),
+        IpAddr::V4(dst),
+    );
+
+    deliver_igmp_to_l7(state, bindings_ctx, device_id, view);
     Ok(())
 }
 
@@ -804,6 +881,14 @@ mod tests {
         ) -> Result<(), IpsReceiveError> {
             Ok(())
         }
+
+        fn receive_igmp_message(
+            &mut self,
+            _device: &FakeDeviceId,
+            _view: ReceivedIgmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -924,6 +1009,14 @@ mod tests {
                 &mut self,
                 _device: &FakeDeviceId,
                 _view: crate::view::ReceivedIcmpMessageView,
+            ) -> Result<(), IpsReceiveError> {
+                Ok(())
+            }
+
+            fn receive_igmp_message(
+                &mut self,
+                _device: &FakeDeviceId,
+                _view: ReceivedIgmpMessageView,
             ) -> Result<(), IpsReceiveError> {
                 Ok(())
             }
@@ -1057,6 +1150,14 @@ mod tests {
             &mut self,
             _device: &FakeDeviceId,
             _view: crate::view::ReceivedIcmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
+
+        fn receive_igmp_message(
+            &mut self,
+            _device: &FakeDeviceId,
+            _view: ReceivedIgmpMessageView,
         ) -> Result<(), IpsReceiveError> {
             Ok(())
         }
@@ -1233,6 +1334,14 @@ mod tests {
         ) -> Result<(), IpsReceiveError> {
             Ok(())
         }
+
+        fn receive_igmp_message(
+            &mut self,
+            _device: &FakeDeviceId,
+            _view: ReceivedIgmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -1394,11 +1503,64 @@ mod tests {
 
     #[test]
     fn non_l4_ipv4_returns_frame_unhandled() {
-        let frame = build_ipv4_frame_with_proto(Ipv4Proto::Igmp, vec![0x11, 0x02, 0x00, 0x00]);
+        let frame = build_ipv4_frame_with_proto(Ipv4Proto::from(47), vec![0x01, 0x02, 0x03, 0x04]);
         let state = IpsState::new();
         let mut handler = Capture { views: Vec::new() };
         assert!(process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frame).is_err());
         assert!(handler.views.is_empty());
+    }
+
+    struct IgmpCapture {
+        views: Vec<crate::view::ReceivedIgmpMessageView>,
+    }
+
+    impl IpsReceiveBindingsContext<FakeDeviceId> for IgmpCapture {
+        fn receive_udp_datagram(
+            &mut self,
+            _device: &FakeDeviceId,
+            _view: ReceivedUdpDatagramView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
+
+        fn receive_tcp_segment(
+            &mut self,
+            _device: &FakeDeviceId,
+            _view: ReceivedTcpSegmentView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
+
+        fn receive_icmp_message(
+            &mut self,
+            _device: &FakeDeviceId,
+            _view: crate::view::ReceivedIcmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
+
+        fn receive_igmp_message(
+            &mut self,
+            _device: &FakeDeviceId,
+            view: crate::view::ReceivedIgmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            self.views.push(view);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn delivers_unfragmented_igmpv3_report_to_l7() {
+        let frame = build_ipv4_frame_with_proto(
+            Ipv4Proto::Igmp,
+            vec![0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00],
+        );
+        let state = IpsState::new();
+        let mut handler = IgmpCapture { views: Vec::new() };
+        process_ethernet_frame(&state, &mut handler, &FakeDeviceId, frame).unwrap();
+        assert_eq!(handler.views.len(), 1);
+        let hdr = handler.views[0].igmp_header().expect("igmp header");
+        assert_eq!(hdr.msg_type, 0x22);
     }
 
     struct IcmpCapture {
@@ -1428,6 +1590,14 @@ mod tests {
             view: crate::view::ReceivedIcmpMessageView,
         ) -> Result<(), IpsReceiveError> {
             self.views.push(view);
+            Ok(())
+        }
+
+        fn receive_igmp_message(
+            &mut self,
+            _device: &FakeDeviceId,
+            _view: ReceivedIgmpMessageView,
+        ) -> Result<(), IpsReceiveError> {
             Ok(())
         }
     }
