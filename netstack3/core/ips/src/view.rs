@@ -9,13 +9,12 @@ use core::ops::Range;
 
 use net_types::ethernet::Mac;
 use net_types::ip::{IpAddr, Ipv4Addr, Ipv6Addr};
-use packet::{Buf, FragmentedByteSlice};
-use packet_formats::ethernet::{EtherType, ETHERNET_HDR_LEN_NO_TAG};
+use packet::{Buf, FragmentedByteSlice, ParseBuffer};
+use packet_formats::ethernet::{
+    EtherType, EthernetFrame, EthernetFrameLengthCheck, ETHERNET_HDR_LEN_NO_TAG,
+};
 
 use crate::frame_store::EthFrameStore;
-
-const ETHERNET_ETHERTYPE_OFFSET: usize = 12;
-const ETHERNET_MIN_ILLEGAL_ETHERTYPE: u16 = 1501;
 
 /// Metadata describing IP fragment reception and reassembly per RFC 5722.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -512,24 +511,14 @@ pub(crate) fn parse_ethernet_header(
     frame: &[u8],
     eth_frame_index: usize,
 ) -> Option<EthernetHeaderView> {
-    if frame.len() < ETHERNET_HDR_LEN_NO_TAG {
-        return None;
-    }
-    let dst_mac = Mac::new(frame[0..6].try_into().ok()?);
-    let src_mac = Mac::new(frame[6..12].try_into().ok()?);
-    let ethertype_raw = u16::from_be_bytes([
-        frame[ETHERNET_ETHERTYPE_OFFSET],
-        frame[ETHERNET_ETHERTYPE_OFFSET + 1],
-    ]);
-    let ethertype = if ethertype_raw >= ETHERNET_MIN_ILLEGAL_ETHERTYPE {
-        Some(EtherType::from(ethertype_raw))
-    } else {
-        None
-    };
+    let mut bytes = frame;
+    let eth = bytes
+        .parse_with::<_, EthernetFrame<_>>(EthernetFrameLengthCheck::NoCheck)
+        .ok()?;
     Some(EthernetHeaderView {
-        src_mac,
-        dst_mac,
-        ethertype,
+        src_mac: eth.src_mac(),
+        dst_mac: eth.dst_mac(),
+        ethertype: eth.ethertype(),
         eth_frame_index,
         header_range: 0..ETHERNET_HDR_LEN_NO_TAG,
     })
@@ -590,43 +579,51 @@ pub(crate) fn parse_tcp_header(
 
 #[cfg(test)]
 mod tests {
-    use alloc::vec;
-
     use net_types::ethernet::Mac;
-    use packet_formats::ethernet::EtherType;
+    use netstack3_base::NetworkSerializationContext;
+    use packet::{Buf, NestableSerializer as _, Serializer};
+    use packet_formats::ethernet::{EtherType, EthernetFrameBuilder};
 
     use super::*;
 
+    fn serialize_ethernet_frame(src: Mac, dst: Mac, ethertype: EtherType) -> Vec<u8> {
+        let eth = EthernetFrameBuilder::new(src, dst, ethertype, 0);
+        Buf::new(alloc::vec![], ..)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner()
+    }
+
     #[test]
     fn parse_ethernet_header_reads_mac_and_ethertype() {
-        let mut frame = vec![0u8; 14];
-        frame[0..6].copy_from_slice(&[0x02, 0x02, 0x02, 0x02, 0x02, 0x02]);
-        frame[6..12].copy_from_slice(&[0x02, 0x02, 0x02, 0x02, 0x02, 0x01]);
-        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        const SRC: Mac = Mac::new([0x02, 0x02, 0x02, 0x02, 0x02, 0x01]);
+        const DST: Mac = Mac::new([0x02, 0x02, 0x02, 0x02, 0x02, 0x02]);
+        let frame = serialize_ethernet_frame(SRC, DST, EtherType::Ipv4);
 
         let hdr = parse_ethernet_header(&frame, 0).expect("ethernet header");
-        assert_eq!(hdr.dst_mac, Mac::new([0x02, 0x02, 0x02, 0x02, 0x02, 0x02]));
-        assert_eq!(hdr.src_mac, Mac::new([0x02, 0x02, 0x02, 0x02, 0x02, 0x01]));
+        assert_eq!(hdr.dst_mac, DST);
+        assert_eq!(hdr.src_mac, SRC);
         assert_eq!(hdr.ethertype, Some(EtherType::Ipv4));
-        assert_eq!(hdr.header_range, 0..14);
+        assert_eq!(hdr.header_range, 0..ETHERNET_HDR_LEN_NO_TAG);
     }
 
     #[test]
     fn received_view_populates_ethernet_header_from_first_fragment() {
-        let mut frame = vec![0u8; 14];
-        frame[0..6].copy_from_slice(&[0xAA; 6]);
-        frame[6..12].copy_from_slice(&[0xBB; 6]);
-        frame[12..14].copy_from_slice(&0x86DDu16.to_be_bytes());
+        const SRC: Mac = Mac::new([0xBB; Mac::BYTES]);
+        const DST: Mac = Mac::new([0xAA; Mac::BYTES]);
+        let frame = serialize_ethernet_frame(SRC, DST, EtherType::Ipv6);
 
         let view = ReceivedUdpDatagramView::new(
             alloc::vec![Buf::new(frame, ..)],
             alloc::vec![IpFragmentInfo {
                 eth_frame_index: 0,
-                ip_packet_range: 14..14,
+                ip_packet_range: ETHERNET_HDR_LEN_NO_TAG..ETHERNET_HDR_LEN_NO_TAG,
                 identification: 1,
                 fragment_offset: 0,
                 more_fragments: false,
-                ip_body_range: 14..14,
+                ip_body_range: ETHERNET_HDR_LEN_NO_TAG..ETHERNET_HDR_LEN_NO_TAG,
             }],
             IpFragmentMetadata::default(),
             None,
@@ -636,8 +633,8 @@ mod tests {
         );
 
         let eth = view.ethernet_header().expect("ethernet view");
-        assert_eq!(eth.src_mac, Mac::new([0xBB; 6]));
-        assert_eq!(eth.dst_mac, Mac::new([0xAA; 6]));
+        assert_eq!(eth.src_mac, SRC);
+        assert_eq!(eth.dst_mac, DST);
         assert_eq!(eth.ethertype, Some(EtherType::Ipv6));
     }
 }
