@@ -114,7 +114,23 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for TcpOptionsInspector {
             _view: netstack3_ips::ReceivedIgmpMessageView,
         ) -> Result<(), IpsReceiveError> {
             Ok(())
-        }}
+        
+        fn receive_pim_message(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            _view: netstack3_ips::ReceivedPimMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
+
+        fn receive_ipsec_message(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            _view: netstack3_ips::ReceivedIpsecMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
+    }
 
 fn is_known_option_kind(kind: u8) -> bool {
     matches!(

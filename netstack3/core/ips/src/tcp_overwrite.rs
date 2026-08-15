@@ -798,7 +798,22 @@ mod tests {
             ) -> Result<(), IpsReceiveError> {
                 Ok(())
             }
-        }
+
+            fn receive_pim_message(
+                &mut self,
+                _device: &FakeDeviceId,
+                _view: crate::view::ReceivedPimMessageView,
+            ) -> Result<(), IpsReceiveError> {
+                Ok(())
+            }
+
+            fn receive_ipsec_message(
+                &mut self,
+                _device: &FakeDeviceId,
+                _view: crate::view::ReceivedIpsecMessageView,
+            ) -> Result<(), IpsReceiveError> {
+                Ok(())
+            }        }
 
         let state = IpsState::new();
         let mut handler = Capture { view: None };

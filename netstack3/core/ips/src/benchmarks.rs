@@ -182,6 +182,21 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for NoopIpsBindings {
     ) -> Result<(), IpsReceiveError> {
         Ok(())
     }
+    fn receive_pim_message(
+        &mut self,
+        _device_id: &FakeDeviceId,
+        _view: crate::view::ReceivedPimMessageView,
+    ) -> Result<(), IpsReceiveError> {
+        Ok(())
+    }
+
+    fn receive_ipsec_message(
+        &mut self,
+        _device_id: &FakeDeviceId,
+        _view: crate::view::ReceivedIpsecMessageView,
+    ) -> Result<(), IpsReceiveError> {
+        Ok(())
+    }
 }
 
 /// How [`OverwriteIpsBindings`] rewrites the UDP payload after ingress.
@@ -255,6 +270,21 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for OverwriteIpsBindings {
         &mut self,
         _device_id: &FakeDeviceId,
         _view: crate::view::ReceivedIgmpMessageView,
+    ) -> Result<(), IpsReceiveError> {
+        Ok(())
+    }
+    fn receive_pim_message(
+        &mut self,
+        _device_id: &FakeDeviceId,
+        _view: crate::view::ReceivedPimMessageView,
+    ) -> Result<(), IpsReceiveError> {
+        Ok(())
+    }
+
+    fn receive_ipsec_message(
+        &mut self,
+        _device_id: &FakeDeviceId,
+        _view: crate::view::ReceivedIpsecMessageView,
     ) -> Result<(), IpsReceiveError> {
         Ok(())
     }
@@ -348,6 +378,21 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for TcpNoopIpsBindings {
     ) -> Result<(), IpsReceiveError> {
         Ok(())
     }
+    fn receive_pim_message(
+        &mut self,
+        _device_id: &FakeDeviceId,
+        _view: crate::view::ReceivedPimMessageView,
+    ) -> Result<(), IpsReceiveError> {
+        Ok(())
+    }
+
+    fn receive_ipsec_message(
+        &mut self,
+        _device_id: &FakeDeviceId,
+        _view: crate::view::ReceivedIpsecMessageView,
+    ) -> Result<(), IpsReceiveError> {
+        Ok(())
+    }
 }
 
 /// How [`TcpOverwriteIpsBindings`] rewrites TCP payload after ingress.
@@ -429,6 +474,21 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for TcpOverwriteIpsBindings {
         &mut self,
         _device_id: &FakeDeviceId,
         _view: crate::view::ReceivedIgmpMessageView,
+    ) -> Result<(), IpsReceiveError> {
+        Ok(())
+    }
+    fn receive_pim_message(
+        &mut self,
+        _device_id: &FakeDeviceId,
+        _view: crate::view::ReceivedPimMessageView,
+    ) -> Result<(), IpsReceiveError> {
+        Ok(())
+    }
+
+    fn receive_ipsec_message(
+        &mut self,
+        _device_id: &FakeDeviceId,
+        _view: crate::view::ReceivedIpsecMessageView,
     ) -> Result<(), IpsReceiveError> {
         Ok(())
     }
@@ -628,7 +688,22 @@ fn deliver_tcp_view(template: &[u8]) -> ReceivedTcpSegmentView {
         ) -> Result<(), IpsReceiveError> {
             Ok(())
         }
-    }
+
+        fn receive_pim_message(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            _view: crate::view::ReceivedPimMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
+
+        fn receive_ipsec_message(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            _view: crate::view::ReceivedIpsecMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }    }
 
     let state = IpsState::new();
     let mut capture = Capture { view: None };
@@ -865,7 +940,22 @@ fn deliver_udp_view(template: &[u8]) -> ReceivedUdpDatagramView {
         ) -> Result<(), IpsReceiveError> {
             Ok(())
         }
-    }
+
+        fn receive_pim_message(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            _view: crate::view::ReceivedPimMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
+
+        fn receive_ipsec_message(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            _view: crate::view::ReceivedIpsecMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }    }
 
     let state = IpsState::new();
     let mut capture = Capture { view: None };

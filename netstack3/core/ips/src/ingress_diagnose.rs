@@ -16,13 +16,36 @@ use packet_formats::ip::{IpProto, Ipv4Proto, Ipv6Proto};
 use packet_formats::ipv4::{Ipv4Header, Ipv4Packet};
 use packet_formats::ipv6::{Ipv6Header, Ipv6Packet};
 
-use crate::view::{parse_icmp_header, parse_igmp_header, parse_tcp_header, parse_udp_header};
+use crate::view::{
+    parse_ah_header, parse_esp_header, parse_icmp_header, parse_igmp_header, parse_pim_header,
+    parse_tcp_header, parse_udp_header,
+};
+
+const IP_PROTO_ESP: u8 = 50;
+const IP_PROTO_AH: u8 = 51;
+const IP_PROTO_PIM: u8 = 103;
 
 enum DiagnoseIpv4L4 {
     Udp,
     Tcp,
     Icmp,
     Igmp,
+    Pim,
+    Esp,
+    Ah,
+}
+
+fn diagnose_ipv4_l4(proto: Ipv4Proto) -> Option<DiagnoseIpv4L4> {
+    match proto {
+        Ipv4Proto::Proto(IpProto::Udp) => Some(DiagnoseIpv4L4::Udp),
+        Ipv4Proto::Proto(IpProto::Tcp) => Some(DiagnoseIpv4L4::Tcp),
+        Ipv4Proto::Icmp => Some(DiagnoseIpv4L4::Icmp),
+        Ipv4Proto::Igmp => Some(DiagnoseIpv4L4::Igmp),
+        Ipv4Proto::Other(IP_PROTO_PIM) => Some(DiagnoseIpv4L4::Pim),
+        Ipv4Proto::Other(IP_PROTO_ESP) => Some(DiagnoseIpv4L4::Esp),
+        Ipv4Proto::Other(IP_PROTO_AH) => Some(DiagnoseIpv4L4::Ah),
+        _ => None,
+    }
 }
 
 /// One IPS ingress rejection stage (matches `process_ethernet_frame` error paths).
@@ -42,6 +65,12 @@ pub enum IngressRejectionStage {
     IcmpHeaderParse,
     /// IGMP header could not be parsed (IPv4 path).
     IgmpHeaderParse,
+    /// PIM header could not be parsed (IPv4 path).
+    PimHeaderParse,
+    /// ESP header could not be parsed (IPv4 path).
+    EspHeaderParse,
+    /// AH header could not be parsed (IPv4 path).
+    AhHeaderParse,
     /// Frame ends before the UDP payload start (IPv4 only).
     FrameTruncated,
     /// TCP header could not be parsed (IPv4 only).
@@ -65,6 +94,9 @@ impl IngressRejectionStage {
             Self::UdpHeaderParse => "udp_header_parse",
             Self::IcmpHeaderParse => "icmp_header_parse",
             Self::IgmpHeaderParse => "igmp_header_parse",
+            Self::PimHeaderParse => "pim_header_parse",
+            Self::EspHeaderParse => "esp_header_parse",
+            Self::AhHeaderParse => "ah_header_parse",
             Self::FrameTruncated => "frame_truncated",
             Self::TcpHeaderParse => "tcp_header_parse",
             Self::Ipv6Parse => "ipv6_parse",
@@ -78,10 +110,13 @@ impl IngressRejectionStage {
             Self::EthernetParse => "malformed or truncated Ethernet header",
             Self::UnsupportedEthertype => "EtherType is not IPv4 (0x0800) or IPv6 (0x86DD)",
             Self::Ipv4Parse => "malformed or truncated IPv4 header",
-            Self::UnsupportedIpv4Protocol => "IPv4 protocol is not UDP, TCP, ICMP, or IGMP",
+            Self::UnsupportedIpv4Protocol => "IPv4 protocol is not UDP, TCP, ICMP, IGMP, PIM, ESP, or AH",
             Self::UdpHeaderParse => "malformed or truncated UDP header",
             Self::IcmpHeaderParse => "malformed or truncated ICMP header",
             Self::IgmpHeaderParse => "malformed or truncated IGMP header",
+            Self::PimHeaderParse => "malformed or truncated PIM header",
+            Self::EspHeaderParse => "malformed or truncated ESP header",
+            Self::AhHeaderParse => "malformed or truncated AH header",
             Self::FrameTruncated => "frame shorter than UDP header + payload start",
             Self::TcpHeaderParse => "malformed or truncated TCP header",
             Self::Ipv6Parse => "malformed or truncated IPv6 header",
@@ -228,15 +263,12 @@ fn diagnose_ipv4(
             }
         };
 
-        let l4 = match packet.proto() {
-            Ipv4Proto::Proto(IpProto::Udp) => DiagnoseIpv4L4::Udp,
-            Ipv4Proto::Proto(IpProto::Tcp) => DiagnoseIpv4L4::Tcp,
-            Ipv4Proto::Icmp => DiagnoseIpv4L4::Icmp,
-            Ipv4Proto::Igmp => DiagnoseIpv4L4::Igmp,
-            other => {
+        let l4 = match diagnose_ipv4_l4(packet.proto()) {
+            Some(l4) => l4,
+            None => {
                 diag.stage = IngressRejectionStage::UnsupportedIpv4Protocol;
                 diag.reason = diag.stage.default_reason();
-                diag.ip_protocol = Some(other.into());
+                diag.ip_protocol = Some(packet.proto().into());
                 diag.src_ip = Some(IpAddr::V4(packet.src_ip()));
                 diag.dst_ip = Some(IpAddr::V4(packet.dst_ip()));
                 return Some(diag.clone());
@@ -262,13 +294,23 @@ fn diagnose_ipv4(
         DiagnoseIpv4L4::Tcp => IpProto::Tcp.into(),
         DiagnoseIpv4L4::Icmp => Ipv4Proto::Icmp.into(),
         DiagnoseIpv4L4::Igmp => Ipv4Proto::Igmp.into(),
+        DiagnoseIpv4L4::Pim => Ipv4Proto::from(IP_PROTO_PIM).into(),
+        DiagnoseIpv4L4::Esp => Ipv4Proto::from(IP_PROTO_ESP).into(),
+        DiagnoseIpv4L4::Ah => Ipv4Proto::from(IP_PROTO_AH).into(),
     });
 
     let fragmented = mf || offset != 0;
     if fragmented {
-        return if matches!(l4, DiagnoseIpv4L4::Icmp | DiagnoseIpv4L4::Igmp) {
+        return if matches!(
+            l4,
+            DiagnoseIpv4L4::Icmp
+                | DiagnoseIpv4L4::Igmp
+                | DiagnoseIpv4L4::Pim
+                | DiagnoseIpv4L4::Esp
+                | DiagnoseIpv4L4::Ah
+        ) {
             diag.stage = IngressRejectionStage::UnsupportedIpv4Protocol;
-            diag.reason = "fragmented ICMP/IGMP is not supported on ingress";
+            diag.reason = "fragmented ICMP/IGMP/PIM/IPsec is not supported on ingress";
             Some(diag.clone())
         } else {
             None
@@ -319,10 +361,29 @@ fn diagnose_ipv4(
             }
             None
         }
-        _ => {
-            diag.stage = IngressRejectionStage::UnsupportedIpv4Protocol;
-            diag.reason = diag.stage.default_reason();
-            Some(diag.clone())
+        DiagnoseIpv4L4::Pim => {
+            if parse_pim_header(frame, 0, body_start).is_none() {
+                diag.stage = IngressRejectionStage::PimHeaderParse;
+                diag.reason = diag.stage.default_reason();
+                return Some(diag.clone());
+            }
+            None
+        }
+        DiagnoseIpv4L4::Esp => {
+            if parse_esp_header(frame, 0, body_start).is_none() {
+                diag.stage = IngressRejectionStage::EspHeaderParse;
+                diag.reason = diag.stage.default_reason();
+                return Some(diag.clone());
+            }
+            None
+        }
+        DiagnoseIpv4L4::Ah => {
+            if parse_ah_header(frame, 0, body_start).is_none() {
+                diag.stage = IngressRejectionStage::AhHeaderParse;
+                diag.reason = diag.stage.default_reason();
+                return Some(diag.clone());
+            }
+            None
         }
     }
 }
@@ -468,7 +529,22 @@ mod tests {
         ) -> Result<(), IpsReceiveError> {
             Ok(())
         }
-    }
+
+        fn receive_pim_message(
+            &mut self,
+            _device: &FakeDeviceId,
+            _view: crate::view::ReceivedPimMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
+
+        fn receive_ipsec_message(
+            &mut self,
+            _device: &FakeDeviceId,
+            _view: crate::view::ReceivedIpsecMessageView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }    }
 
     fn assert_diagnosis_matches_rejection(frame: Buf<Vec<u8>>) {
         let bytes = frame.as_ref().to_vec();
@@ -550,6 +626,51 @@ mod tests {
         let igmp_bytes = igmp.as_ref().to_vec();
         assert!(diagnose_ingress_rejection(&igmp_bytes).is_none());
         assert_diagnosis_matches_rejection(Buf::new(igmp_bytes, ..));
+
+        let pim = {
+            let ip = Ipv4PacketBuilder::new(REMOTE, LOCAL, 64, Ipv4Proto::from(103));
+            let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
+            Buf::new(vec![0x20, 0x00, 0x00, 0x00], ..)
+                .wrap_in(ip)
+                .wrap_in(eth)
+                .serialize_vec_outer(&mut NetworkSerializationContext::default())
+                .unwrap()
+                .into_inner()
+        };
+        let pim_bytes = pim.as_ref().to_vec();
+        assert!(diagnose_ingress_rejection(&pim_bytes).is_none());
+        assert_diagnosis_matches_rejection(Buf::new(pim_bytes, ..));
+
+        let esp = {
+            let ip = Ipv4PacketBuilder::new(REMOTE, LOCAL, 64, Ipv4Proto::from(50));
+            let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
+            Buf::new(vec![0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01], ..)
+                .wrap_in(ip)
+                .wrap_in(eth)
+                .serialize_vec_outer(&mut NetworkSerializationContext::default())
+                .unwrap()
+                .into_inner()
+        };
+        let esp_bytes = esp.as_ref().to_vec();
+        assert!(diagnose_ingress_rejection(&esp_bytes).is_none());
+        assert_diagnosis_matches_rejection(Buf::new(esp_bytes, ..));
+
+        let ah = {
+            let ip = Ipv4PacketBuilder::new(REMOTE, LOCAL, 64, Ipv4Proto::from(51));
+            let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
+            Buf::new(
+                vec![0x04, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01],
+                ..,
+            )
+                .wrap_in(ip)
+                .wrap_in(eth)
+                .serialize_vec_outer(&mut NetworkSerializationContext::default())
+                .unwrap()
+                .into_inner()
+        };
+        let ah_bytes = ah.as_ref().to_vec();
+        assert!(diagnose_ingress_rejection(&ah_bytes).is_none());
+        assert_diagnosis_matches_rejection(Buf::new(ah_bytes, ..));
 
         let unknown_l4 = {
             let ip = Ipv4PacketBuilder::new(REMOTE, LOCAL, 64, Ipv4Proto::from(47));

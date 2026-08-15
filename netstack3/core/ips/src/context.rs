@@ -12,7 +12,8 @@ use netstack3_base::StrongDeviceIdentifier;
 use packet::{Buffer as _, BufferMut, GrowBuffer as _};
 
 use crate::view::{
-    ReceivedIcmpMessageView, ReceivedIgmpMessageView, ReceivedTcpSegmentView, ReceivedUdpDatagramView,
+    ReceivedIcmpMessageView, ReceivedIgmpMessageView, ReceivedIpsecMessageView,
+    ReceivedPimMessageView, ReceivedTcpSegmentView, ReceivedUdpDatagramView,
 };
 
 /// Errors encountered when delivering to Layer 7.
@@ -50,6 +51,20 @@ pub trait IpsReceiveBindingsContext<D: StrongDeviceIdentifier> {
         &mut self,
         device_id: &D,
         view: ReceivedIgmpMessageView,
+    ) -> Result<(), IpsReceiveError>;
+
+    /// Delivers a PIM (IPv4 multicast routing) message view.
+    fn receive_pim_message(
+        &mut self,
+        device_id: &D,
+        view: ReceivedPimMessageView,
+    ) -> Result<(), IpsReceiveError>;
+
+    /// Delivers an IPsec ESP or AH message view.
+    fn receive_ipsec_message(
+        &mut self,
+        device_id: &D,
+        view: ReceivedIpsecMessageView,
     ) -> Result<(), IpsReceiveError>;
 }
 
