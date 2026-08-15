@@ -10,7 +10,7 @@ name = "netstack3_udp"
 [features]
 testutils = ["instrumented"]
 instrumented = []
-benchmark = ["testutils", "netstack3_base/testutils", "netstack3_ip/testutils", "netstack3_filter/testutils", "netstack3_datagram/testutils", "dep:criterion"]
+benchmark = ["testutils", "netstack3_base/testutils", "netstack3_base/single-threaded", "netstack3_ip/testutils", "netstack3_filter/testutils", "netstack3_datagram/testutils", "dep:criterion"]
 
 [dependencies]
 criterion = { workspace = true, optional = true }

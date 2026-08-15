@@ -8,6 +8,9 @@
 
 extern crate alloc;
 
+#[cfg(all(feature = "single-threaded", loom))]
+compile_error!("the `single-threaded` and `loom` features are mutually exclusive");
+
 #[cfg(loom)]
 pub(crate) use loom::sync;
 #[cfg(not(loom))]
@@ -19,6 +22,10 @@ use net_types::ip::{GenericOverIp, Ip};
 pub use sync::atomic;
 
 pub mod rc;
+
+mod rwlock;
+
+pub use rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// A [`sync::Mutex`] assuming lock poisoning will never occur.
 #[derive(Debug, Default)]
@@ -80,95 +87,6 @@ where
     T: GenericOverIp<I>,
 {
     type Type = Mutex<T::Type>;
-}
-
-/// A [`sync::RwLock`] assuming lock poisoning will never occur.
-#[derive(Debug, Default)]
-pub struct RwLock<T>(sync::RwLock<T>);
-
-/// Lock guard for read access to a [`RwLock`].
-pub type RwLockReadGuard<'a, T> =
-    lock_guard::LockGuard<'a, RwLock<T>, sync::RwLockReadGuard<'a, T>>;
-
-/// Lock guard for write access to a [`RwLock`].
-pub type RwLockWriteGuard<'a, T> =
-    lock_guard::LockGuard<'a, RwLock<T>, sync::RwLockWriteGuard<'a, T>>;
-
-impl<T> RwLock<T> {
-    /// Creates a new instance of an `RwLock<T>` which is unlocked.
-    pub fn new(t: T) -> RwLock<T> {
-        RwLock(sync::RwLock::new(t))
-    }
-
-    /// Locks this rwlock with shared read access, blocking the current thread
-    /// until it can be acquired.
-    ///
-    /// See [`sync::RwLock::read`] for more details.
-    ///
-    /// # Panics
-    ///
-    /// This method may panic if the calling thread already holds the read or
-    /// write lock.
-    #[inline]
-    #[cfg_attr(feature = "recursive-lock-panic", track_caller)]
-    pub fn read(&self) -> RwLockReadGuard<'_, T> {
-        lock_guard::LockGuard::new(self, |Self(rw)| rw.read().expect("unexpectedly poisoned"))
-    }
-
-    /// Locks this rwlock with exclusive write access, blocking the current
-    /// thread until it can be acquired.
-    ///
-    /// See [`sync::RwLock::write`] for more details.
-    ///
-    /// # Panics
-    ///
-    /// This method may panic if the calling thread already holds the read or
-    /// write lock.
-    #[inline]
-    #[cfg_attr(feature = "recursive-lock-panic", track_caller)]
-    pub fn write(&self) -> RwLockWriteGuard<'_, T> {
-        lock_guard::LockGuard::new(self, |Self(rw)| rw.write().expect("unexpectedly poisoned"))
-    }
-
-    /// Consumes this rwlock, returning the underlying data.
-    #[inline]
-    pub fn into_inner(self) -> T {
-        let Self(rwlock) = self;
-        rwlock.into_inner().expect("unexpectedly poisoned")
-    }
-
-    /// Returns a mutable reference to the underlying data.
-    ///
-    /// Since this call borrows the [`RwLock`] mutably, no actual locking needs
-    /// to take place. See [`sync::RwLock::get_mut`] for more details.
-    #[inline]
-    // TODO(https://github.com/tokio-rs/loom/pull/322): remove the disable for
-    // loom once loom's lock type supports the method.
-    #[cfg(not(loom))]
-    pub fn get_mut(&mut self) -> &mut T {
-        self.0.get_mut().expect("unexpectedly poisoned")
-    }
-}
-
-impl<T: 'static> lock_order::lock::ReadWriteLock<T> for RwLock<T> {
-    type ReadGuard<'l> = RwLockReadGuard<'l, T>;
-
-    type WriteGuard<'l> = RwLockWriteGuard<'l, T>;
-
-    fn read_lock(&self) -> Self::ReadGuard<'_> {
-        self.read()
-    }
-
-    fn write_lock(&self) -> Self::WriteGuard<'_> {
-        self.write()
-    }
-}
-
-impl<T, I: Ip> GenericOverIp<I> for RwLock<T>
-where
-    T: GenericOverIp<I>,
-{
-    type Type = RwLock<T::Type>;
 }
 
 mod lock_guard {
@@ -369,6 +287,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "single-threaded"))]
     fn rwlock_read_and_write_from_different_threads() {
         const NUM_THREADS: u32 = 4;
 

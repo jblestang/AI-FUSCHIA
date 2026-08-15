@@ -168,8 +168,8 @@ pub mod socketmap {
 
 /// Sync utilities common to netstack3.
 pub mod sync {
-    // TODO(https://fxbug.dev/42062225): Support single-threaded variants of
-    // types exported from this module.
+    // Single-threaded variants of sync primitives are available via the
+    // `single-threaded` feature on `netstack3_sync` / `netstack3_base`.
 
     // Exclusively re-exports from the sync crate.
     pub use netstack3_sync::rc::{
