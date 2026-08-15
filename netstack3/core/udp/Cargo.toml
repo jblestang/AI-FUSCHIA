@@ -38,3 +38,7 @@ netstack3_macros = { package = "netstack3-macros", path = "../macros" }
 name = "udp_receive_throughput"
 harness = false
 required-features = ["benchmark"]
+
+[[example]]
+name = "profile_udp_receive"
+required-features = ["benchmark"]

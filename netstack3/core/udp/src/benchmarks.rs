@@ -30,7 +30,7 @@ pub const TARGET_GBPS: f64 = 1.0;
 pub const TARGET_BPS: u64 = 1_000_000_000;
 
 /// Duration of traffic simulated per benchmark iteration.
-const BATCH_DURATION: core::time::Duration = core::time::Duration::from_millis(10);
+pub const BATCH_DURATION: core::time::Duration = core::time::Duration::from_millis(10);
 
 const LOCAL_PORT: NonZeroU16 = NonZeroU16::new(100).unwrap();
 const REMOTE_PORT: NonZeroU16 = NonZeroU16::new(200).unwrap();
@@ -151,6 +151,50 @@ pub fn add_udp_receive_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
             });
         });
         group.throughput(Throughput::Bytes(1));
+    }
+}
+
+/// Runs the UDP receive hot loop for CPU profiling (perf / samply).
+///
+/// Executes receive bursts using `payload_len`-byte UDP payloads until
+/// `batches` iterations complete. Pass `None` for `batches` to loop forever
+/// (for external profilers that stop the process after a duration).
+pub fn profile_hot_loop(payload_len: usize, batches: Option<u64>) {
+    let wire_bytes = ipv4_udp_wire_bytes(payload_len);
+    let packet_count = packets_for_rate(wire_bytes, BATCH_DURATION);
+
+    let mut packet = build_ipv4_udp_packet(payload_len);
+    let mut ctx = UdpFakeDeviceCtx::with_core_ctx(UdpFakeDeviceCoreCtx::new_fake_device::<Ipv4>());
+    let mut api = UdpApi::<Ipv4, _>::new(ctx.as_mut());
+    let _socket = api.create();
+    api.listen(&_socket, Some(ZonedAddr::Unzoned(local_ip::<Ipv4>())), Some(LOCAL_PORT))
+        .expect("listen failed");
+
+    let UdpPacketMeta { src_ip, dst_ip, .. } = packet.meta;
+    let early_demux_socket =
+        <UdpIpTransportContext as IpTransportContext<Ipv4, _, _>>::early_demux(
+            ctx.as_mut().core_ctx,
+            &FakeDeviceId,
+            src_ip,
+            dst_ip,
+            packet.buffer.as_ref(),
+        );
+
+    let mut batch = 0u64;
+    loop {
+        if batches.is_some_and(|limit| batch >= limit) {
+            break;
+        }
+        batch += 1;
+        let ctx_pair = ctx.as_mut();
+        for _ in 0..packet_count {
+            receive_ipv4_udp_packet(
+                ctx_pair.core_ctx,
+                ctx_pair.bindings_ctx,
+                &mut packet,
+                early_demux_socket.clone(),
+            );
+        }
     }
 }
 
