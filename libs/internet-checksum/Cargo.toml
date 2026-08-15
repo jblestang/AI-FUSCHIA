@@ -5,3 +5,7 @@ version.workspace = true
 license.workspace = true
 
 [lib]
+
+[dev-dependencies]
+rand = { workspace = true }
+rand_xorshift = { workspace = true }

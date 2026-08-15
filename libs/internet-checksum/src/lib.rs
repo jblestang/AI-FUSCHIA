@@ -30,6 +30,15 @@
 // 3. Induce the compiler to produce `adc` instruction: this is a very
 //    useful instruction to implement 1's complement addition and available
 //    on both x86 and ARM. The functions `adc_uXX` are for this use.
+//
+// 4. AVX2 fast path (x86_64 only): for buffers larger than
+//    [`AVX2_CHECKSUM_THRESHOLD`], load 32 bytes at a time with AVX2 and add
+//    each u64 lane into the u128 scalar accumulator (never accumulating in
+//    SIMD lanes, which would wrap modulo 2^64).
+
+/// Minimum buffer length (exclusive) to use the AVX2 checksum fast path.
+#[cfg(target_arch = "x86_64")]
+const AVX2_CHECKSUM_THRESHOLD: usize = 256;
 
 /// Compute the checksum of "bytes".
 ///
@@ -156,29 +165,19 @@ impl Checksum {
             bytes = &bytes[1..];
         }
 
-        // NB: Even though our accumulator is 16 bytes, summing in 8 byte chunks
-        // (rather than 16 byte chunks) leads to better optimized machine code
-        // on 64 bit platforms.
-        while let Some(chunk) = bytes.first_chunk::<8>() {
-            sum += u64::from_ne_bytes(*chunk) as u128;
-            bytes = &bytes[8..];
+        #[cfg(target_arch = "x86_64")]
+        if bytes.len() > AVX2_CHECKSUM_THRESHOLD && avx2_available() {
+            // SAFETY: `avx2_available()` checks for AVX2 support at runtime.
+            let (new_sum, remainder) = unsafe { add_u64_chunks_avx2(sum, bytes) };
+            sum = new_sum;
+            bytes = remainder;
         }
 
-        // Handle the tail.
-        if let Some(chunk) = bytes.first_chunk::<4>() {
-            sum += u32::from_ne_bytes(*chunk) as u128;
-            bytes = &bytes[4..];
-        }
-        if let Some(chunk) = bytes.first_chunk::<2>() {
-            sum += u16::from_ne_bytes(*chunk) as u128;
-            bytes = &bytes[2..];
-        }
-        if bytes.len() == 1 {
-            // Stash the trailing byte.
-            self.trailing_byte = Some(bytes[0]);
-        }
-
+        let (sum, trailing_byte) = add_bytes_scalar_tail(sum, bytes);
         self.sum = sum;
+        if let Some(byte) = trailing_byte {
+            self.trailing_byte = Some(byte);
+        }
     }
 
     /// Computes the checksum, but in big endian byte order.
@@ -237,6 +236,59 @@ macro_rules! impl_adc {
 impl_adc!(adc_u16, u16);
 impl_adc!(adc_u32, u32);
 impl_adc!(adc_u64, u64);
+
+/// Adds the remaining bytes to `sum` using the scalar u64/u32/u16 fast path.
+///
+/// Returns the updated sum and an optional trailing byte when `bytes` has odd
+/// length.
+#[inline]
+fn add_bytes_scalar_tail(mut sum: u128, mut bytes: &[u8]) -> (u128, Option<u8>) {
+    // NB: Even though our accumulator is 16 bytes, summing in 8 byte chunks
+    // (rather than 16 byte chunks) leads to better optimized machine code
+    // on 64 bit platforms.
+    while let Some(chunk) = bytes.first_chunk::<8>() {
+        sum += u64::from_ne_bytes(*chunk) as u128;
+        bytes = &bytes[8..];
+    }
+
+    // Handle the tail.
+    if let Some(chunk) = bytes.first_chunk::<4>() {
+        sum += u32::from_ne_bytes(*chunk) as u128;
+        bytes = &bytes[4..];
+    }
+    if let Some(chunk) = bytes.first_chunk::<2>() {
+        sum += u16::from_ne_bytes(*chunk) as u128;
+        bytes = &bytes[2..];
+    }
+    let trailing_byte = if bytes.len() == 1 { Some(bytes[0]) } else { None };
+    (sum, trailing_byte)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn avx2_available() -> bool {
+    std::is_x86_feature_detected!("avx2")
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn add_u64_chunks_avx2(mut sum: u128, mut bytes: &[u8]) -> (u128, &[u8]) {
+    use core::arch::x86_64::{_mm256_loadu_si256, _mm256_storeu_si256};
+
+    while bytes.len() >= 32 {
+        let chunk = unsafe { _mm256_loadu_si256(bytes.as_ptr().cast()) };
+        let mut lanes = [0u64; 4];
+        unsafe { _mm256_storeu_si256(lanes.as_mut_ptr().cast(), chunk) };
+        sum += lanes[0] as u128;
+        sum += lanes[1] as u128;
+        sum += lanes[2] as u128;
+        sum += lanes[3] as u128;
+        bytes = &bytes[32..];
+    }
+
+    (sum, bytes)
+}
 
 /// Normalizes the accumulator by mopping up the
 /// overflow until it fits in a `u16`.
@@ -478,6 +530,47 @@ mod tests {
         c.add_bytes(&[0]);
         c.add_bytes(&[0]);
         assert_eq!(c.checksum(), [255, 255]);
+    }
+
+    /// Computes a checksum without using the AVX2 fast path by feeding at most
+    /// [`super::AVX2_CHECKSUM_THRESHOLD`] bytes per call.
+    fn checksum_scalar_chunks(bytes: &[u8]) -> [u8; 2] {
+        let mut c = Checksum::new();
+        for chunk in bytes.chunks(super::AVX2_CHECKSUM_THRESHOLD) {
+            c.add_bytes(chunk);
+        }
+        c.checksum()
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_avx2_matches_scalar() {
+        if !super::avx2_available() {
+            return;
+        }
+
+        let mut rng = new_rng(0xA7B2_C0DE);
+
+        for len in [257, 512, 1024, 4096, 9000, 16_384] {
+            let mut buf = vec![0u8; len];
+            rng.fill(&mut buf[..]);
+            let scalar = checksum_scalar_chunks(&buf);
+            let mut c = Checksum::new();
+            c.add_bytes(&buf);
+            let avx = c.checksum();
+            assert_eq!(avx, scalar, "len={len}");
+        }
+
+        // Odd lengths exercise trailing-byte handling across the threshold.
+        for len in [255, 256, 257, 511, 512, 513] {
+            let mut buf = vec![0u8; len];
+            rng.fill(&mut buf[..]);
+            let scalar = checksum_scalar_chunks(&buf);
+            let mut c = Checksum::new();
+            c.add_bytes(&buf);
+            let avx = c.checksum();
+            assert_eq!(avx, scalar, "len={len}");
+        }
     }
 
     // Regression test for https://fxbug.dev/515753165.
