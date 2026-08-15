@@ -142,6 +142,7 @@ fn receive_ipv4_udp_packet_borrowed(
     let UdpPacketMeta { src_ip, dst_ip, dst_port, dscp_and_ecn, .. } = meta;
 
     let mut storage = storage.clone();
+    let frame_storage = Some(storage.clone());
     let scratch = Arc::make_mut(&mut storage);
     let result = <UdpIpTransportContext as IpTransportContext<Ipv4, _, _>>::receive_ip_packet(
         core_ctx,
@@ -152,7 +153,7 @@ fn receive_ipv4_udp_packet_borrowed(
         Buf::new(&mut scratch[..], ..),
         &mut LocalDeliveryPacketInfo {
             header_info: FakeIpHeaderInfo { dscp_and_ecn: *dscp_and_ecn, ..Default::default() },
-            frame_storage: Some(storage),
+            frame_storage,
             ..Default::default()
         },
         early_demux_socket.cloned(),
@@ -176,6 +177,7 @@ fn receive_ipv4_udp_packet_owned(
     let UdpPacketMeta { src_ip, dst_ip, dst_port, dscp_and_ecn, .. } = meta;
 
     let mut storage = storage.clone();
+    let frame_storage = Some(storage.clone());
     let scratch = Arc::make_mut(&mut storage);
     let result = <UdpIpTransportContext as IpTransportContext<Ipv4, _, _>>::receive_ip_packet(
         core_ctx,
@@ -186,7 +188,7 @@ fn receive_ipv4_udp_packet_owned(
         Buf::new(&mut scratch[..], ..),
         &mut LocalDeliveryPacketInfo {
             header_info: FakeIpHeaderInfo { dscp_and_ecn, ..Default::default() },
-            frame_storage: Some(storage),
+            frame_storage,
             ..Default::default()
         },
         early_demux_socket,
