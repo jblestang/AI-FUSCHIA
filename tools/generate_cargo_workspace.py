@@ -50,6 +50,7 @@ WORKSPACE_MEMBERS = [
     "libs/ip-test-macro",
     "libs/test_util",
     "libs/proptest-support",
+    "libs/gpu-auth-filter",
     "netstack3/core/hashmap",
     "netstack3/core/lock-order",
     "netstack3/core/macros",
@@ -107,6 +108,10 @@ strum_macros = "0.26"
 syn = { version = "2.0", features = ["full", "visit-mut"] }
 thiserror = "2.0"
 zerocopy = { version = "0.8", features = ["derive"] }
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+bytemuck = { version = "1.22", features = ["derive"] }
+pollster = "0.4"
+wgpu = "24"
 """
 
 
@@ -258,6 +263,30 @@ syn = { workspace = true }
         + """
 [dependencies]
 proptest = "1.6"
+""",
+    )
+    render(
+        "libs/gpu-auth-filter",
+        pkg("gpu-auth-filter")
+        + """
+description = "High-throughput batch filtering by comparing data against authorized bitmasks (CPU SIMD + optional GPU compute)"
+
+[features]
+default = []
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
+[dependencies]
+bytemuck = { workspace = true, features = ["derive"], optional = true }
+pollster = { workspace = true, optional = true }
+wgpu = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true, features = ["html_reports"] }
+rand = { workspace = true }
+
+[[bench]]
+name = "batch_authorize"
+harness = false
 """,
     )
 
