@@ -17,7 +17,8 @@
 - Checksum modes: `NicOffload` (default, zero fields) and `ComputeInSoftware`.
 - IPS bypasses sockets/filtering/routing — deliver via new `receive_tcp_segment` binding, not `TcpApi`.
 - No TCP stream reassembly at IPS layer — one IP datagram (possibly IP-reassembled) = one `ReceivedTcpSegmentView`.
-- Do not modify seq/ack/flags/window/options in `TcpOverwriter`; payload bytes only.
+- L7 agents may **keep a prefix** of the original payload and **drop the rest** (incomplete application data); the overwriter must apply partial edits, not only full-payload replacement.
+- Per-flow **sequence/ACK adjustment** is required in **both directions** when bytes are removed or injected (classic inline-IPS / TCP-NAT mangling semantics).
 
 ---
 
@@ -30,7 +31,9 @@
 | `netstack3/core/ips/src/fragment.rs` | Modify | Parameterize assembly keys by `IpProto` |
 | `netstack3/core/ips/src/receive.rs` | Modify | TCP proto dispatch, `build_tcp_views`, delivery |
 | `netstack3/core/ips/src/context.rs` | Modify | `receive_tcp_segment` on bindings trait |
-| `netstack3/core/ips/src/overwrite.rs` | Modify | Add `TcpOverwriter` alongside existing `UdpOverwriter` |
+| `netstack3/core/ips/src/tcp_flow.rs` | Create | Per-4-tuple flow table + cumulative seq/ack deltas |
+| `netstack3/core/ips/src/overwrite.rs` | Modify | Add `TcpOverwriter` with partial payload edits + seq/ack patch |
+| `netstack3/core/ips/src/state.rs` | Modify | Hold `IpsTcpFlowTable` alongside fragment caches |
 | `netstack3/core/ips/src/benchmarks.rs` | Modify | TCP receive + overwrite Criterion groups |
 | `netstack3/core/ips/examples/tcp_overwrite_payload.rs` | Create | Runnable TCP sanitization example |
 | `netstack3/core/ips/examples/multi_source_tcp_fragments.rs` | Create | Interleaved multi-source TCP fragment demo |
@@ -300,101 +303,189 @@ git commit -am "feat(ips): zero-copy TCP segment ingress with RFC 5722 reassembl
 
 ---
 
-### Task 5: Implement `TcpOverwriter`
+### Task 5: Per-flow TCP sequence/ACK state
 
 **Files:**
-- Modify: `netstack3/core/ips/src/overwrite.rs`
+- Create: `netstack3/core/ips/src/tcp_flow.rs`
+- Modify: `netstack3/core/ips/src/state.rs`
 - Modify: `netstack3/core/ips/src/lib.rs`
+
+**Problem:** When the L7 agent drops bytes from a segment (incomplete/malicious tail), the on-wire TCP byte stream is shorter than the sender believes. Every subsequent **SEQ** in that direction and every **ACK** in the reverse direction must be adjusted by the cumulative delta — same semantics as inline IPS / TCP NAT sequence mangling.
 
 **Interfaces:**
 - Produces:
-  - `TcpOverwriteChecksum` (same variants as UDP)
-  - `TcpOverwriteError` (mirror UDP + `MissingTcpHeader`)
-  - `TcpOverwriter<'a>` with `new`, `with_checksum`, `overwrite_payload`, `overwrite_payload_in_place`, `payload_len`
+  - `TcpFlowKey { src_ip, src_port, dst_ip, dst_port }`
+  - `TcpFlowDirection` — `ClientToServer` | `ServerToClient` (derived from key orientation)
+  - `TcpFlowState { delta_c2s: u32, delta_s2c: u32 }` — bytes **removed** from each direction (add bytes removed, subtract if injecting)
+  - `IpsTcpFlowTable` — `HashMap<TcpFlowKey, TcpFlowState>` with eviction policy (LRU, default cap 64k flows)
+  - `fn flow_direction(key: &TcpFlowKey, segment: &TcpHeaderView) -> TcpFlowDirection`
+  - `fn adjust_seq_ack(state: &TcpFlowState, dir: TcpFlowDirection, raw_seq: u32, raw_ack: Option<u32>) -> (u32, Option<u32>)`
+  - `fn record_payload_edit(state: &mut TcpFlowState, dir: TcpFlowDirection, removed: u32, injected: u32)`
 
-**TCP-specific wire patching** (no UDP length field):
+**Adjustment rules** (bytes removed from C→S stream; symmetric for S→C):
 
-| Field | Offset (within IPv4 packet) | On shrink/grow |
-|-------|----------------------------|----------------|
-| IPv4 total length | +2 | Recompute |
-| IPv4 flags/frag | +6 | Clear MF, zero frag offset on consolidate |
-| IPv4 header checksum | +10 | Zero or recompute |
-| TCP checksum | tcp_hdr+16 | Zero or recompute pseudo-header checksum |
+| Field on segment | Direction | Formula |
+|------------------|-----------|---------|
+| SEQ | same as edited segment | `seq' = seq - delta_this_dir` |
+| ACK | same as edited segment | `ack' = ack - delta_reverse_dir` |
+| (pass-through segment) | opposite dir | apply both row above before forward |
 
-- [ ] **Step 1: Write failing tests** (in `overwrite.rs` `mod tests`)
+After editing payload on C→S: `delta_c2s += (original_payload_len - forwarded_payload_len)`.
 
-```rust
-#[test]
-fn overwrite_shrinks_unfragmented_tcp_and_zeros_checksums() {
-    // 64-byte payload → 32-byte payload
-    // assert IPv4 total len = 20 + tcp_hdr_len + 32
-    // assert TCP/IPv4 checksum bytes zero (NicOffload)
-}
-
-#[test]
-fn overwrite_shrinks_fragmented_tcp_to_single_fragment() {
-    // Mirror UDP test: 200-byte payload across 2 IP fragments → 32 bytes
-    // assert 1 eth frame, MF cleared, payload consolidated
-}
-
-#[test]
-fn overwrite_in_place_same_length_tcp() { /* ... */ }
-
-#[test]
-fn overwrite_computes_tcp_checksum_in_software() { /* TcpOverwriteChecksum::ComputeInSoftware */ }
-```
-
-- [ ] **Step 2: Run tests — expect FAIL**
-
-Run: `cargo test -p netstack3-ips overwrite::tests -- --nocapture`
-
-- [ ] **Step 3: Implement `TcpOverwriter`**
-
-Copy `UdpOverwriter` structure; remove UDP length patching; add:
+- [ ] **Step 1: Write failing tests**
 
 ```rust
-fn tcp_header_len(frame: &[u8], tcp_start: usize) -> usize {
-    let data_offset = (frame[tcp_start + 12] >> 4) as usize;
-    data_offset * 4
-}
-
-fn patch_unfragmented_lengths_tcp(
-    &mut self,
-    frame_index: usize,
-    ip_start: usize,
-    payload_end: usize,
-    tcp_hdr_len: usize,
-) -> Result<(), TcpOverwriteError> {
-    let ip_total = (payload_end - ip_start) as u16;
-    // write ip_total at ip_start+2, clear frag bits, zero/recompute checksums
+#[test]
+fn seq_and_ack_adjust_after_bytes_removed_from_c2s() {
+    let mut state = TcpFlowState::default();
+    // C→S segment seq=1000, remove 20 payload bytes → delta_c2s=20
+    record_payload_edit(&mut state, TcpFlowDirection::ClientToServer, 20, 0);
+    // Next C→S segment raw seq=1100 → adjusted 1080
+    assert_eq!(adjust_seq_ack(&state, TcpFlowDirection::ClientToServer, 1100, None).0, 1080);
+    // S→C segment raw ack=1100 → adjusted 1080
+    let (_, ack) = adjust_seq_ack(&state, TcpFlowDirection::ServerToClient, 5000, Some(1100));
+    assert_eq!(ack, Some(1080));
 }
 ```
 
-Software checksum: use `internet_checksum` + TCP pseudo-header (src/dst IP, proto=6, tcp segment length) — mirror `packet_formats` transport checksum helpers if available, else duplicate UDP's pattern with `IpProto::Tcp`.
+- [ ] **Step 2: Run test — expect FAIL**
 
-Reuse shrink/consolidate flow from UDP (`shrink_to_single_frame`, `overwrite_single_frame`) adapted for variable TCP header length.
+Run: `cargo test -p netstack3-ips tcp_flow -- --nocapture`
 
-Add convenience on view:
+- [ ] **Step 3: Implement flow table + adjustment helpers**
 
-```rust
-impl ReceivedTcpSegmentView {
-    pub fn tcp_overwriter(&mut self) -> TcpOverwriter<'_> {
-        TcpOverwriter::new(self)
-    }
-}
-```
+Wire `IpsTcpFlowTable` into `IpsState`. Lookup/create flow on each TCP segment delivery.
 
 - [ ] **Step 4: Run tests — expect PASS**
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit -am "feat(ips): add TcpOverwriter with in-place payload rewrite"
+git commit -am "feat(ips): add per-flow TCP seq/ack delta tracking"
 ```
 
 ---
 
-### Task 6: TCP benchmarks and examples
+### Task 6: Implement `TcpOverwriter` with partial payload edits
+
+**Files:**
+- Modify: `netstack3/core/ips/src/overwrite.rs`
+- Modify: `netstack3/core/ips/src/view.rs`
+- Modify: `netstack3/core/ips/src/lib.rs`
+
+**Interfaces:**
+- Produces:
+  - `TcpPayloadEdit { keep_from_original: Range<usize>, inject_after_keep: &' [u8] }` — keep `[start..end)` of reassembled payload; optionally append injected bytes; **drop everything after `end`**
+  - `TcpOverwriteChecksum`, `TcpOverwriteError` (+ `InvalidKeepRange`, `SeqAckOverflow`)
+  - `TcpOverwriter<'a, 'flow>` with `flow: &'flow mut TcpFlowState`, `direction: TcpFlowDirection`
+
+**L7 agent contract:**
+
+```rust
+// Agent validated first 40 bytes of an 80-byte segment; drop incomplete tail.
+overwriter.apply_edit(TcpPayloadEdit {
+    keep_from_original: 0..40,
+    inject_after_keep: &[],  // or sanitized replacement prefix
+})?;
+// Overwriter: copies keep range in-place, truncates payload, updates delta,
+// patches seq/ack on THIS segment, IPv4 total len, checksums, consolidates fragments.
+```
+
+**Wire patching** (beyond UDP):
+
+| Field | When |
+|-------|------|
+| TCP payload | Copy `keep` range; truncate to `keep.len() + inject.len()` |
+| TCP SEQ | `raw_seq - delta_this_dir` (before edit; edit then increments delta) |
+| TCP ACK | `raw_ack - delta_reverse_dir` if ACK flag set |
+| IPv4 total length | `ip_hdr + tcp_hdr + new_payload_len` |
+| IPv4/TCP checksums | NicOffload or ComputeInSoftware |
+
+**Control flags:** SYN/FIN each consume 1 seq slot; payload edit on SYN/FIN segments must not strip the control byte from seq accounting (`removed` applies to payload only; control seq consumption unchanged).
+
+- [ ] **Step 1: Write failing tests**
+
+```rust
+#[test]
+fn partial_keep_drops_incomplete_tail_and_zeros_checksums() {
+    // 80-byte payload; keep 0..40
+    // assert payload len 40, IPv4 total len updated, checksums zero
+}
+
+#[test]
+fn partial_keep_updates_flow_delta_for_subsequent_seq() {
+    // edit removes 40 bytes on C→S; next segment seq adjusted by 40
+}
+
+#[test]
+fn reverse_direction_ack_adjusted_after_c2s_edit() {
+    // after C→S drop, S→C segment with ack=1100 → ack=1060 on wire
+}
+
+#[test]
+fn keep_range_with_inject_prefix() {
+    // keep 10..50, inject [0xDE, 0xAD] before kept bytes → payload len 2+40
+    // delta accounts for (80 - 42) removed
+}
+
+#[test]
+fn fragmented_tcp_partial_edit_consolidates_to_one_frame() {
+    // 200-byte payload, keep 0..32 → single frame, MF cleared
+}
+```
+
+- [ ] **Step 2: Run tests — expect FAIL**
+
+Run: `cargo test -p netstack3-ips overwrite::tests -- --nocapture`
+
+- [ ] **Step 3: Implement `TcpOverwriter::apply_edit`**
+
+Reuse frame shrink/consolidate from UDP path. Add seq/ack patch before checksum recompute:
+
+```rust
+fn patch_tcp_seq_ack(
+    buf: &mut [u8],
+    tcp_start: usize,
+    seq: u32,
+    ack: Option<u32>,
+    ack_flag: bool,
+) {
+    buf[tcp_start + 4..tcp_start + 8].copy_from_slice(&seq.to_be_bytes());
+    if ack_flag {
+        if let Some(a) = ack {
+            buf[tcp_start + 8..tcp_start + 12].copy_from_slice(&a.to_be_bytes());
+        }
+    }
+}
+```
+
+Expose on view:
+
+```rust
+impl ReceivedTcpSegmentView {
+    pub fn tcp_overwriter<'a>(
+        &'a mut self,
+        flow: &'a mut TcpFlowState,
+        direction: TcpFlowDirection,
+    ) -> TcpOverwriter<'a> {
+        TcpOverwriter::new(self, flow, direction)
+    }
+}
+```
+
+**Pass-through path:** Add `TcpOverwriter::adjust_headers_only()` for segments the L7 agent forwards unchanged but still need seq/ack mangling because a prior edit on the same flow changed deltas.
+
+- [ ] **Step 4: Run tests — expect PASS**
+
+- [ ] **Step 5: Commit**
+
+```bash
+git commit -am "feat(ips): TcpOverwriter with partial edits and seq/ack adjustment"
+```
+
+---
+
+### Task 7: TCP benchmarks and examples
 
 **Files:**
 - Modify: `netstack3/core/ips/src/benchmarks.rs`
@@ -416,14 +507,14 @@ pub fn ethernet_ipv4_tcp_wire_bytes(payload_len: usize) -> usize {
 
 Mirror PR12 groups:
 - `netstack3/ips/tcp_receive_throughput` — `process_ethernet_frame` + no-op `receive_tcp_segment`
-- `netstack3/ips/tcp_overwrite_throughput` — receive + `TcpOverwriter::overwrite_payload_in_place`
-- `netstack3/ips/tcp_overwrite_breakdown` — in-place vs shrink-half paths
+- `netstack3/ips/tcp_overwrite_throughput` — receive + `TcpOverwriter::apply_edit` (partial keep)
+- `netstack3/ips/tcp_overwrite_breakdown` — partial-keep vs full-drop vs adjust-headers-only paths
 
 Register in `ips_receive_throughput.rs` bench binary.
 
 - [ ] **Step 3: Add examples**
 
-`tcp_overwrite_payload.rs`: receive one TCP segment, inspect payload slices, rewrite with `TcpOverwriter`, print wire lengths.
+`tcp_overwrite_payload.rs`: receive one TCP segment, keep validated prefix (drop incomplete tail), apply edit with flow state, print seq/ack before and after.
 
 `multi_source_tcp_fragments.rs`: feed three interleaved fragmented TCP flows; print reassembly outcomes.
 
@@ -441,7 +532,30 @@ git commit -am "feat(ips): TCP receive/overwrite benchmarks and examples"
 
 ---
 
-### Task 7: Analysis helpers — confirm TCP compatibility
+### Task 8: Bidirectional seq/ack integration test
+
+**Files:**
+- Create: `netstack3/core/ips/examples/tcp_bidirectional_mangle.rs`
+- Tests in `netstack3/core/ips/src/overwrite.rs`
+
+Simulate a minimal request/response on one flow:
+
+1. C→S data segment (100 bytes) → L7 keeps 60, drops 40
+2. S→C ACK segment acknowledging 100 → must forward ack=60
+3. C→S next data seq=1100 → must forward seq=1060
+4. S→C data seq=5000 → unchanged (no S→C edit yet)
+
+- [ ] **Step 1: Write integration test covering all four steps**
+- [ ] **Step 2: Run `cargo test -p netstack3-ips bidirectional` — expect PASS**
+- [ ] **Step 3: Commit**
+
+```bash
+git commit -am "test(ips): bidirectional TCP seq/ack mangling integration"
+```
+
+---
+
+### Task 9: Analysis helpers — confirm TCP compatibility
 
 **Files:**
 - Modify: `netstack3/core/ips/src/analysis/mod.rs` (docs only unless gaps found)
@@ -466,7 +580,7 @@ git commit -am "test(ips): verify IP analysis helpers work on TCP segment views"
 
 ---
 
-### Task 8: Final integration and verification
+### Task 10: Final integration and verification
 
 **Files:**
 - Modify: `netstack3/core/src/testutil.rs`
@@ -503,19 +617,47 @@ PR title: **IPS zero-copy TCP receive path with TcpOverwriter (parity with PR #1
 | Concern | UDP (PR12) | TCP (this plan) |
 |---------|------------|-----------------|
 | L7 delivery type | `ReceivedUdpDatagramView` | `ReceivedTcpSegmentView` |
+| L7 edit model | Full payload replace / same-len patch | **Partial keep + drop tail** (+ optional inject) |
 | Header parsing | Fixed 8 bytes | Variable via TCP data offset |
 | Length field update | UDP length + IPv4 total | IPv4 total only |
 | Checksum | UDP + IPv4 header | TCP + IPv4 header (pseudo-header) |
 | Fragment cache key | `(..., IpProto::Udp)` | `(..., IpProto::Tcp)` |
 | Overwriter consolidate | Shrink to 1 frame, clear MF | Same |
-| Stream semantics | Datagram = message | Segment = one IP datagram (no byte-stream reassembly) |
+| Stream semantics | Datagram = message | Per-segment + **flow-level seq/ack deltas** |
+| Flow state | None | `IpsTcpFlowTable` per 4-tuple |
+
+## Seq/ACK mangling model
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant IPS as IPS L7
+    participant S as Server
+
+    C->>IPS: SEQ=1000, 80B payload
+    Note over IPS: keep 0..40, drop tail<br/>delta_c2s += 40
+    IPS->>S: SEQ=1000, 40B payload
+
+    S->>IPS: ACK=1080 (raw, pre-mangle)
+    Note over IPS: ack' = 1080 - 40 = 1040
+    IPS->>C: ACK=1040
+
+    C->>IPS: SEQ=1080 (raw next segment)
+    Note over IPS: seq' = 1080 - 40 = 1040
+    IPS->>S: SEQ=1040, ...
+```
+
+**Important:** IPS does **not** reassemble TCP byte streams across segments. Each segment is edited independently; the L7 agent decides how much of *this* segment's payload is safe to forward. Flow state only tracks cumulative byte deltas for header mangling on pass-through and subsequent segments.
 
 ## Risks and Out-of-Scope
 
 - **TCP header split across IP fragments:** `build_tcp_views` must refuse/incomplete if the first fragment does not contain the full TCP header (data offset bytes); deliver with `MissingTcpHeader` metadata rather than guessing.
 - **TCP options beyond 20 bytes:** v1 overwrite preserves existing options bytes; does not add/remove options.
 - **IPv6 TCP overwrite:** receive only; overwriter returns `UnsupportedIpVersion`.
-- **SYN/FIN/RST-only segments:** zero-payload segments are valid; overwriter allows zero-length payload replace.
+- **SYN/FIN/RST-only segments:** zero-payload segments valid; `apply_edit` with empty keep on payload-only segments; SYN/FIN seq consumption tracked separately from payload delta.
+- **Cross-segment incomplete messages:** IPS does not buffer partial app messages across segments — L7 keeps what is valid **within the current segment** only. Multi-segment app reassembly is the agent's responsibility upstream of `apply_edit`.
+- **Flow table exhaustion:** evict LRU flows; evicted flow → `TcpOverwriteError::UnknownFlow` unless recreated (agent must pass-through unmodified or re-sync).
+- **Simultaneous open / reset:** RST segments use `adjust_headers_only`; RST payload edits rejected.
 
 ## Self-Review
 
@@ -523,11 +665,13 @@ PR title: **IPS zero-copy TCP receive path with TcpOverwriter (parity with PR #1
 |------------------|------|
 | Zero-copy TCP ingress | Task 4 |
 | RFC 5722 fragment policy | Task 4 (reuses existing cache) |
-| TcpOverwriter parity with UdpOverwriter | Task 5 |
-| NicOffload / ComputeInSoftware | Task 5 |
+| Partial keep / drop incomplete tail | Task 6 |
+| Per-flow seq/ack deltas (both directions) | Task 5, Task 8 |
+| TcpOverwriter wire patch + checksums | Task 6 |
+| NicOffload / ComputeInSoftware | Task 6 |
 | Multi-source fragment test | Task 4 |
-| Benchmarks | Task 6 |
-| Analysis helpers | Task 7 |
+| Benchmarks | Task 7 |
+| Analysis helpers | Task 9 |
 | Shared frame mutation (DRY) | Task 1 |
 
 No placeholders remain; all tasks include concrete paths and test entry points.
