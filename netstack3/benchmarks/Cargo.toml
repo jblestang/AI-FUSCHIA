@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 criterion = { workspace = true }
-netstack3_base = { package = "netstack3-base", path = "../core/base", features = ["testutils"] }
+netstack3_base = { package = "netstack3-base", path = "../core/base", features = ["testutils", "single-threaded"] }
 netstack3_sync = { package = "netstack3-sync", path = "../core/sync", features = ["single-threaded"] }
 netstack3_udp = { package = "netstack3-udp", path = "../core/udp", features = ["bench-support"] }
 

@@ -11,9 +11,12 @@ name = "netstack3_udp"
 testutils = ["instrumented"]
 instrumented = []
 single-stack = []
+# No-op bindings receive path for throughput measurement (bench builds only).
+bench-receive = []
 bench-support = [
     "testutils",
     "single-stack",
+    "bench-receive",
     "netstack3_base/testutils",
     "netstack3_ip/testutils",
     "netstack3_filter/testutils",
