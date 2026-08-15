@@ -970,8 +970,8 @@ impl<
         info: &mut LocalDeliveryPacketInfo<Ipv4, H>,
         _early_demux_socket: Option<Never>,
     ) -> Result<(), (B, Icmpv4Error)> {
-        let LocalDeliveryPacketInfo { meta, header_info: _, marks } = info;
-        let ReceiveIpPacketMeta { broadcast: _, transparent_override, parsing_context: _ } = meta;
+        let LocalDeliveryPacketInfo { meta, header_info: _, marks, frame_storage: _ } = info;
+        let ReceiveIpPacketMeta { broadcast: _, transparent_override, parsing_context: _, frame_storage: _ } = meta;
         if let Some(delivery) = transparent_override {
             unreachable!(
                 "cannot perform transparent local delivery {delivery:?} to an ICMP socket; \
@@ -1981,8 +1981,8 @@ impl<
         info: &mut LocalDeliveryPacketInfo<Ipv6, H>,
         _early_demux_socket: Option<Never>,
     ) -> Result<(), (B, Icmpv6Error)> {
-        let LocalDeliveryPacketInfo { meta, header_info, marks } = info;
-        let ReceiveIpPacketMeta { broadcast: _, transparent_override, parsing_context: _ } = meta;
+        let LocalDeliveryPacketInfo { meta, header_info, marks, frame_storage: _ } = info;
+        let ReceiveIpPacketMeta { broadcast: _, transparent_override, parsing_context: _, frame_storage: _ } = meta;
         if let Some(delivery) = transparent_override {
             unreachable!(
                 "cannot perform transparent local delivery {delivery:?} to an ICMP socket; \

@@ -1160,6 +1160,26 @@ impl UdpPacketMeta<Ipv4> {
 
 use crate::internal::receive_buffer::UdpReceiveBuffer;
 
+fn udp_payload_view(
+    frame_storage: &Option<alloc::sync::Arc<[u8]>>,
+    packet: &packet_formats::udp::UdpPacket<&[u8]>,
+) -> UdpReceiveBuffer {
+    let payload = packet.body();
+    if let Some(frame) = frame_storage {
+        let start = payload.as_ptr() as usize - frame.as_ptr() as usize;
+        let end = start + payload.len();
+        if end <= frame.len() {
+            return UdpReceiveBuffer::view(netstack3_ip::PacketSegment::view_in(
+                frame.clone(),
+                start..end,
+            ));
+        }
+    }
+    // Fallback when storage was split by copy-on-write (e.g. extra Arc clones before
+    // header mutation). One capture at delivery; fan-out still shares the view.
+    UdpReceiveBuffer::view(netstack3_ip::PacketSegment::capture(payload))
+}
+
 /// A datagram dequeued from a socket receive queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UdpRecvDatagram<I: Ip> {
@@ -1781,6 +1801,7 @@ fn receive_ip_packet_early_demux<
     header_info: &H,
     parsing_context: &mut NetworkParsingContext,
     early_demux_socket: I::DualStackBoundSocketId<CC::WeakDeviceId, Udp<BC>>,
+    frame_storage: Option<alloc::sync::Arc<[u8]>>,
 ) -> Result<(), (B, I::IcmpError)> {
     let Ok(packet) = buffer.parse_with::<_, UdpPacket<_>>(UdpParseArgs::with_context(
         src_ip,
@@ -1806,16 +1827,7 @@ fn receive_ip_packet_early_demux<
         dscp_and_ecn: header_info.dscp_and_ecn(),
     };
 
-    let body = {
-        #[cfg(feature = "bench-receive")]
-        {
-            UdpReceiveBuffer::bench_receive_placeholder()
-        }
-        #[cfg(not(feature = "bench-receive"))]
-        {
-            UdpReceiveBuffer::from_slice(packet.body())
-        }
-    };
+    let body = udp_payload_view(&frame_storage, &packet);
     let was_delivered = deliver_early_demux_socket::<I, _, _, _>(
         core_ctx,
         bindings_ctx,
@@ -1857,8 +1869,8 @@ fn receive_ip_packet<
     info: &mut LocalDeliveryPacketInfo<I, H>,
     early_demux_socket: Option<DualStackUdpSocketId<I, CC::WeakDeviceId, BC>>,
 ) -> Result<(), (B, I::IcmpError)> {
-    let LocalDeliveryPacketInfo { meta, header_info, marks: _ } = info;
-    let ReceiveIpPacketMeta { broadcast, transparent_override, parsing_context } = meta;
+    let LocalDeliveryPacketInfo { meta, header_info, marks: _, frame_storage } = info;
+    let ReceiveIpPacketMeta { broadcast, transparent_override, parsing_context, frame_storage: _ } = meta;
 
     trace_duration!("udp::receive_ip_packet");
     trace!("received UDP packet: {:x?}", buffer.as_mut());
@@ -1875,6 +1887,7 @@ fn receive_ip_packet<
             header_info,
             parsing_context,
             early_demux_socket.expect("checked is_some above"),
+            frame_storage.clone(),
         );
     }
 
@@ -1976,16 +1989,7 @@ fn receive_ip_packet<
         dscp_and_ecn: header_info.dscp_and_ecn(),
     };
 
-    let body = {
-        #[cfg(feature = "bench-receive")]
-        {
-            UdpReceiveBuffer::bench_receive_placeholder()
-        }
-        #[cfg(not(feature = "bench-receive"))]
-        {
-            UdpReceiveBuffer::from_slice(packet.body())
-        }
-    };
+    let body = udp_payload_view(&frame_storage, &packet);
     let was_delivered = recipients.into_iter().fold(false, |was_delivered, lookup_result| {
         let delivered = try_dual_stack_deliver::<I, BC, CC, H>(
             core_ctx,
@@ -4316,11 +4320,14 @@ mod tests {
         let UdpPacketMeta { src_ip, src_port, dst_ip, dst_port, dscp_and_ecn } = meta;
         let builder = UdpPacketBuilder::new(src_ip, dst_ip, src_port, dst_port);
 
-        let buffer = builder
+        let buffer_buf: Buf<Vec<u8>> = builder
             .wrap_body(Buf::new(body.to_owned(), ..))
             .serialize_vec_outer(&mut NetworkSerializationContext::default())
             .unwrap()
             .into_inner();
+
+        let pinned = netstack3_ip::PinnedFrameBuffer::from_buf(buffer_buf);
+        let buffer = pinned;
 
         let early_demux_socket = match early_demux_mode {
             EarlyDemuxMode::Enabled => {
@@ -5546,7 +5553,13 @@ mod tests {
             &HashMap::from([(
                 listener.downgrade(),
                 SocketReceived {
-                    packets: vec![ReceivedPacket { meta, body: UdpReceiveBuffer::from(&[][..]) }],
+                    packets: vec![ReceivedPacket {
+                        meta,
+                        body: UdpReceiveBuffer::view(netstack3_ip::PacketSegment::view_in(
+                            alloc::sync::Arc::from([]),
+                            0..0,
+                        )),
+                    }],
                     max_size: usize::MAX
                 }
             )])

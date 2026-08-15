@@ -4,6 +4,7 @@
 
 //! UDP receive throughput benchmark support.
 
+use alloc::sync::Arc;
 use alloc::format;
 use core::num::NonZeroU16;
 
@@ -54,7 +55,7 @@ fn setup_connected_benchmark_ctx(packet: &PreparedPacket) -> BenchmarkCtx {
             &FakeDeviceId,
             src_ip,
             dst_ip,
-            packet.buffer.as_ref(),
+            packet.storage.as_ref(),
         )
         .expect("early_demux must resolve connected socket for benchmark traffic");
 
@@ -94,13 +95,13 @@ pub fn total_wire_bytes(wire_bytes: usize, packet_count: u64) -> u64 {
 }
 
 struct PreparedPacket {
-    buffer: alloc::vec::Vec<u8>,
+    storage: Arc<[u8]>,
     meta: UdpPacketMeta<Ipv4>,
 }
 
 impl Clone for PreparedPacket {
     fn clone(&self) -> Self {
-        Self { buffer: self.buffer.clone(), meta: self.meta.clone() }
+        Self { storage: self.storage.clone(), meta: self.meta.clone() }
     }
 }
 
@@ -122,7 +123,7 @@ fn build_ipv4_udp_packet(payload_len: usize) -> PreparedPacket {
         .expect("serialize benchmark packet")
         .into_inner()
         .into_inner();
-    PreparedPacket { buffer, meta }
+    PreparedPacket { storage: Arc::from(buffer), meta }
 }
 
 fn receive_ipv4_udp_packet_borrowed(
@@ -137,18 +138,21 @@ fn receive_ipv4_udp_packet_borrowed(
         >,
     >,
 ) {
-    let PreparedPacket { buffer, meta } = packet;
+    let PreparedPacket { storage, meta } = packet;
     let UdpPacketMeta { src_ip, dst_ip, dst_port, dscp_and_ecn, .. } = meta;
 
+    let mut storage = storage.clone();
+    let scratch = Arc::make_mut(&mut storage);
     let result = <UdpIpTransportContext as IpTransportContext<Ipv4, _, _>>::receive_ip_packet(
         core_ctx,
         bindings_ctx,
         &FakeDeviceId,
         Ipv4::into_recv_src_addr(*src_ip),
         SpecifiedAddr::new(*dst_ip).unwrap(),
-        Buf::new(&mut buffer[..], ..),
+        Buf::new(&mut scratch[..], ..),
         &mut LocalDeliveryPacketInfo {
             header_info: FakeIpHeaderInfo { dscp_and_ecn: *dscp_and_ecn, ..Default::default() },
+            frame_storage: Some(storage),
             ..Default::default()
         },
         early_demux_socket.cloned(),
@@ -168,18 +172,21 @@ fn receive_ipv4_udp_packet_owned(
         >,
     >,
 ) {
-    let PreparedPacket { buffer, meta } = packet;
+    let PreparedPacket { storage, meta } = packet;
     let UdpPacketMeta { src_ip, dst_ip, dst_port, dscp_and_ecn, .. } = meta;
 
+    let mut storage = storage.clone();
+    let scratch = Arc::make_mut(&mut storage);
     let result = <UdpIpTransportContext as IpTransportContext<Ipv4, _, _>>::receive_ip_packet(
         core_ctx,
         bindings_ctx,
         &FakeDeviceId,
         Ipv4::into_recv_src_addr(src_ip),
         SpecifiedAddr::new(dst_ip).unwrap(),
-        Buf::new(buffer, ..),
+        Buf::new(&mut scratch[..], ..),
         &mut LocalDeliveryPacketInfo {
             header_info: FakeIpHeaderInfo { dscp_and_ecn, ..Default::default() },
+            frame_storage: Some(storage),
             ..Default::default()
         },
         early_demux_socket,

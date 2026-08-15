@@ -138,8 +138,8 @@ where
         info: &mut LocalDeliveryPacketInfo<I, H>,
         early_demux_socket: Option<Self::EarlyDemuxSocket>,
     ) -> Result<(), (B, I::IcmpError)> {
-        let LocalDeliveryPacketInfo { meta, header_info, marks } = info;
-        let ReceiveIpPacketMeta { broadcast, transparent_override, parsing_context } = meta;
+        let LocalDeliveryPacketInfo { meta, header_info, marks, frame_storage: _ } = info;
+        let ReceiveIpPacketMeta { broadcast: _, transparent_override, parsing_context: _, frame_storage: _ } = meta;
         if let Some(delivery) = transparent_override {
             warn!(
                 "TODO(https://fxbug.dev/337009139): transparent proxy not supported for TCP \

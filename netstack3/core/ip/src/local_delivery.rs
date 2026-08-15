@@ -4,6 +4,7 @@
 
 //! Types and helpers used in local-delivery of packets.
 
+use alloc::sync::Arc;
 use core::num::NonZeroU16;
 
 use net_types::SpecifiedAddr;
@@ -37,6 +38,9 @@ pub struct ReceiveIpPacketMeta<I: IpExt> {
 
     /// The parsing context for the received packet.
     pub parsing_context: NetworkParsingContext,
+
+    /// Pinned RX frame bytes for view-only upper-layer delivery.
+    pub frame_storage: Option<Arc<[u8]>>,
 }
 
 /// Information for an incoming packet.
@@ -51,6 +55,8 @@ pub struct LocalDeliveryPacketInfo<I: IpExt, H: IpHeaderInfo<I>> {
     pub header_info: H,
     /// The marks carried by the incoming packet.
     pub marks: Marks,
+    /// Shared RX frame bytes; upper layers build range views without copying payload.
+    pub frame_storage: Option<Arc<[u8]>>,
 }
 
 /// Abstracts extracting information from IP headers for upper layers.
@@ -149,6 +155,7 @@ pub(crate) mod testutil {
                 broadcast: None,
                 transparent_override: None,
                 parsing_context: NetworkParsingContext::default(),
+                frame_storage: None,
             }
         }
     }
@@ -159,6 +166,7 @@ pub(crate) mod testutil {
                 meta: Default::default(),
                 header_info: Default::default(),
                 marks: Default::default(),
+                frame_storage: None,
             }
         }
     }

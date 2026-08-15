@@ -92,6 +92,7 @@ use crate::internal::multicast_forwarding::{
     MulticastForwardingTimerId,
 };
 use crate::internal::path_mtu::{PmtuBindingsTypes, PmtuCache, PmtuTimerId};
+use crate::internal::pinned_frame::{IntoPinnedFrame, PinnedFrameBuffer};
 use crate::internal::raw::counters::RawIpSocketCounters;
 use crate::internal::raw::{RawIpSocketHandler, RawIpSocketMap, RawIpSocketsBindingsTypes};
 use crate::internal::reassembly::{
@@ -2551,16 +2552,6 @@ pub(crate) fn reject_type_to_icmpv6_error(reject_type: RejectType) -> Option<Icm
 // particular, they may accidentally pass a parse_metadata argument which
 // corresponds to a single extension header rather than all of the IPv6 headers.
 
-/// Returns a pointer to the owned IP buffer when present, for zero-copy transport detach.
-fn owned_ip_buffer_ptr<B: BufferMut>(
-    buffer: &mut packet::Either<B, Buf<Vec<u8>>>,
-) -> Option<*mut Buf<Vec<u8>>> {
-    match buffer {
-        packet::Either::B(b) => Some(b as *mut Buf<Vec<u8>>),
-        packet::Either::A(_) => None,
-    }
-}
-
 /// Dispatch a received IPv4 packet to the appropriate protocol.
 ///
 /// `device` is the device the packet was received on. `parse_metadata` is the
@@ -2589,7 +2580,6 @@ fn dispatch_receive_ipv4_packet<
     mut packet: Ipv4Packet<&'a mut [u8]>,
     mut packet_metadata: IpLayerPacketMetadata<Ipv4, CC::WeakAddressId, BC>,
     receive_meta: ReceiveIpPacketMeta<Ipv4>,
-    owned_ip_buffer: Option<*mut Buf<Vec<u8>>>,
 ) -> Result<(), IcmpErrorSender<'b, Ipv4, CC::DeviceId>> {
     core_ctx.increment_both(device, |c| &c.dispatch_receive_ip_packet);
 
@@ -2675,20 +2665,21 @@ fn dispatch_receive_ipv4_packet<
     let early_demux_socket = early_demux_result.and_then(|result| result.take_socket(&packet));
 
     let proto = packet.proto();
+
+    let frame_storage = receive_meta.frame_storage.clone();
+
     let (prefix, options, body) = packet.parts_with_body_mut();
     let header_info = Ipv4HeaderInfo { prefix, options: options.as_ref() };
-    let mut receive_info = LocalDeliveryPacketInfo { meta: receive_meta, header_info, marks };
-
-    let transport: Buf<Vec<u8>> = if let Some(ip_buffer) = owned_ip_buffer {
-        // SAFETY: `owned_ip_buffer` points at the same backing store as `packet`.
-        // After detach we must not read transport bytes through `packet` until
-        // reattach; IP header fields used for ICMP remain valid in the prefix.
-        unsafe { crate::internal::transport_body::detach_transport_body(&mut *ip_buffer) }
-    } else {
-        Buf::new(body.to_vec(), ..)
+    let mut receive_info = LocalDeliveryPacketInfo {
+        meta: receive_meta,
+        header_info,
+        marks,
+        frame_storage,
     };
 
-    core_ctx
+    let transport = Buf::new(body, ..);
+
+    match core_ctx
         .dispatch_receive_ip_packet(
             bindings_ctx,
             device,
@@ -2698,21 +2689,16 @@ fn dispatch_receive_ipv4_packet<
             transport,
             &mut receive_info,
             early_demux_socket,
-        )
-        .or_else(|(transport, icmp_error)| {
-            if let Some(ip_buffer) = owned_ip_buffer {
-                unsafe {
-                    crate::internal::transport_body::reattach_transport_body(
-                        &mut *ip_buffer,
-                        transport,
-                    );
-                }
-            }
+        ) {
+        Ok(()) => Ok(()),
+        Err((transport, icmp_error)) => {
+            drop(transport);
             match IcmpErrorSender::new(core_ctx, icmp_error, &packet, frame_dst, device, marks) {
                 Some(icmp_sender) => Err(icmp_sender),
                 None => Ok(()),
             }
-        })
+        }
+    }
 }
 
 /// Dispatch a received IPv6 packet to the appropriate protocol.
@@ -2732,7 +2718,6 @@ fn dispatch_receive_ipv6_packet<
     mut packet: Ipv6Packet<&'a mut [u8]>,
     mut packet_metadata: IpLayerPacketMetadata<Ipv6, CC::WeakAddressId, BC>,
     meta: ReceiveIpPacketMeta<Ipv6>,
-    owned_ip_buffer: Option<*mut Buf<Vec<u8>>>,
 ) -> Result<(), IcmpErrorSender<'b, Ipv6, CC::DeviceId>> {
     // TODO(https://fxbug.dev/42095067): Once we support multiple extension
     // headers in IPv6, we will need to verify that the callers of this
@@ -2825,18 +2810,16 @@ fn dispatch_receive_ipv6_packet<
     let early_demux_socket = early_demux_result.and_then(|result| result.take_socket(&packet));
 
     let proto = packet.proto();
+
+    let frame_storage = meta.frame_storage.clone();
+
     let (fixed, extension, body) = packet.parts_with_body_mut();
     let header_info = Ipv6HeaderInfo { fixed, extension };
-    let mut receive_info = LocalDeliveryPacketInfo { meta, header_info, marks };
+    let mut receive_info = LocalDeliveryPacketInfo { meta, header_info, marks, frame_storage };
 
-    let transport: Buf<Vec<u8>> = if let Some(ip_buffer) = owned_ip_buffer {
-        // SAFETY: see `dispatch_receive_ipv4_packet`.
-        unsafe { crate::internal::transport_body::detach_transport_body(&mut *ip_buffer) }
-    } else {
-        Buf::new(body.to_vec(), ..)
-    };
+    let transport = Buf::new(body, ..);
 
-    core_ctx
+    match core_ctx
         .dispatch_receive_ip_packet(
             bindings_ctx,
             device,
@@ -2846,22 +2829,17 @@ fn dispatch_receive_ipv6_packet<
             transport,
             &mut receive_info,
             early_demux_socket,
-        )
-        .or_else(|(transport, icmp_error)| {
-            if let Some(ip_buffer) = owned_ip_buffer {
-                unsafe {
-                    crate::internal::transport_body::reattach_transport_body(
-                        &mut *ip_buffer,
-                        transport,
-                    );
-                }
-            }
+        ) {
+        Ok(()) => Ok(()),
+        Err((transport, icmp_error)) => {
+            drop(transport);
             let marks = receive_info.marks;
             match IcmpErrorSender::new(core_ctx, icmp_error, &packet, frame_dst, device, marks) {
                 Some(icmp_sender) => Err(icmp_sender),
                 None => Ok(()),
             }
-        })
+        }
+    }
 }
 
 /// The metadata required to forward an IP Packet.
@@ -3514,7 +3492,7 @@ macro_rules! clone_packet_for_mcast_forwarding {
 /// for options.
 pub fn receive_ipv4_packet<
     BC: IpLayerBindingsContext<Ipv4, CC::DeviceId>,
-    B: BufferMut,
+    B: IntoPinnedFrame,
     CC: IpLayerIngressContext<Ipv4, BC>,
 >(
     core_ctx: &mut CC,
@@ -3529,10 +3507,7 @@ pub fn receive_ipv4_packet<
         return;
     }
 
-    // This is required because we may need to process the buffer that was
-    // passed in or a reassembled one, which have different types.
-    let mut buffer: packet::Either<B, Buf<Vec<u8>>> = packet::Either::A(buffer);
-    let mut owned_ip_buffer = owned_ip_buffer_ptr(&mut buffer);
+    let mut buffer = buffer.into_pinned_frame();
 
     core_ctx.increment_both(device, |c| &c.receive_ip_packet);
     trace!("receive_ip_packet({device:?})");
@@ -3596,10 +3571,8 @@ pub fn receive_ipv4_packet<
     let mut packet = match process_fragment(core_ctx, bindings_ctx, device, packet) {
         ProcessFragmentResult::Done => return,
         ProcessFragmentResult::NotNeeded(packet) => packet,
-        ProcessFragmentResult::Reassembled(buf) => {
-            let buf = Buf::new(buf, ..);
-            buffer = packet::Either::B(buf);
-            owned_ip_buffer = owned_ip_buffer_ptr(&mut buffer);
+        ProcessFragmentResult::Reassembled(vec) => {
+            buffer = PinnedFrameBuffer::from_vec(vec);
 
             match buffer.parse_mut() {
                 Ok(packet) => packet,
@@ -3647,6 +3620,7 @@ pub fn receive_ipv4_packet<
                 broadcast: None,
                 transparent_override: Some(TransparentLocalDelivery { addr, port }),
                 parsing_context,
+                frame_storage: None,
             };
 
             // Short-circuit the routing process and override local demux, providing a local
@@ -3660,7 +3634,6 @@ pub fn receive_ipv4_packet<
                 packet,
                 packet_metadata,
                 receive_meta,
-                owned_ip_buffer,
             )
             .unwrap_or_else(|icmp_sender| icmp_sender.send(core_ctx, bindings_ctx, buffer));
             return;
@@ -3721,6 +3694,7 @@ pub fn receive_ipv4_packet<
                     broadcast: address_status.to_broadcast_marker(),
                     transparent_override: None,
                     parsing_context,
+                    frame_storage: None,
                 };
                 dispatch_receive_ipv4_packet(
                     core_ctx,
@@ -3730,7 +3704,6 @@ pub fn receive_ipv4_packet<
                     packet,
                     packet_metadata.take().unwrap_or_default(),
                     receive_meta,
-                    owned_ip_buffer,
                 )
                 .unwrap_or_else(|icmp_sender| icmp_sender.send(core_ctx, bindings_ctx, buffer));
             }
@@ -3766,6 +3739,7 @@ pub fn receive_ipv4_packet<
                 broadcast: address_status.to_broadcast_marker(),
                 transparent_override: None,
                 parsing_context,
+                frame_storage: None,
             };
             dispatch_receive_ipv4_packet(
                 core_ctx,
@@ -3775,7 +3749,6 @@ pub fn receive_ipv4_packet<
                 packet,
                 packet_metadata,
                 receive_meta,
-                owned_ip_buffer,
             )
             .unwrap_or_else(|icmp_sender| icmp_sender.send(core_ctx, bindings_ctx, buffer));
         }
@@ -3928,7 +3901,7 @@ fn handle_ipv6_parse_error<BC, B, CC>(
 /// for options.
 pub fn receive_ipv6_packet<
     BC: IpLayerBindingsContext<Ipv6, CC::DeviceId>,
-    B: BufferMut,
+    B: IntoPinnedFrame,
     CC: IpLayerIngressContext<Ipv6, BC>,
 >(
     core_ctx: &mut CC,
@@ -3943,10 +3916,7 @@ pub fn receive_ipv6_packet<
         return;
     }
 
-    // This is required because we may need to process the buffer that was
-    // passed in or a reassembled one, which have different types.
-    let mut buffer: packet::Either<B, Buf<Vec<u8>>> = packet::Either::A(buffer);
-    let mut owned_ip_buffer = owned_ip_buffer_ptr(&mut buffer);
+    let mut buffer = buffer.into_pinned_frame();
 
     core_ctx.increment_both(device, |c| &c.receive_ip_packet);
     trace!("receive_ipv6_packet({:?})", device);
@@ -4065,10 +4035,8 @@ pub fn receive_ipv6_packet<
                         // Fragment header.
                         (packet, Some(Ipv6PacketAction::Continue))
                     }
-                    ProcessFragmentResult::Reassembled(buf) => {
-                        let buf = Buf::new(buf, ..);
-                        buffer = packet::Either::B(buf);
-                        owned_ip_buffer = owned_ip_buffer_ptr(&mut buffer);
+                    ProcessFragmentResult::Reassembled(vec) => {
+                        buffer = PinnedFrameBuffer::from_vec(vec);
 
                         match buffer.parse_mut() {
                             Ok(packet) => (packet, None),
@@ -4117,6 +4085,7 @@ pub fn receive_ipv6_packet<
                 broadcast: None,
                 transparent_override: Some(TransparentLocalDelivery { addr, port }),
                 parsing_context,
+                frame_storage: None,
             };
 
             // Short-circuit the routing process and override local demux, providing a local
@@ -4130,7 +4099,6 @@ pub fn receive_ipv6_packet<
                 packet,
                 packet_metadata,
                 receive_meta,
-                owned_ip_buffer,
             )
             .unwrap_or_else(|icmp_sender| icmp_sender.send(core_ctx, bindings_ctx, buffer));
             return;
@@ -4190,6 +4158,7 @@ pub fn receive_ipv6_packet<
                     broadcast: None,
                     transparent_override: None,
                     parsing_context,
+                    frame_storage: None,
                 };
 
                 dispatch_receive_ipv6_packet(
@@ -4200,7 +4169,6 @@ pub fn receive_ipv6_packet<
                     packet,
                     packet_metadata.take().unwrap_or_default(),
                     receive_meta,
-                    owned_ip_buffer,
                 )
                 .unwrap_or_else(|icmp_sender| icmp_sender.send(core_ctx, bindings_ctx, buffer));
             }
@@ -4258,6 +4226,7 @@ pub fn receive_ipv6_packet<
                         broadcast: None,
                         transparent_override: None,
                         parsing_context,
+                        frame_storage: None,
                     };
                     dispatch_receive_ipv6_packet(
                         core_ctx,
@@ -4267,7 +4236,6 @@ pub fn receive_ipv6_packet<
                         packet,
                         packet_metadata,
                         meta,
-                        owned_ip_buffer,
                     )
                     .unwrap_or_else(|icmp_sender| icmp_sender.send(core_ctx, bindings_ctx, buffer));
                 }

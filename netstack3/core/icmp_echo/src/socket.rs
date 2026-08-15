@@ -1170,8 +1170,8 @@ impl<I: IpExt, BC: IcmpEchoBindingsContext<I, CC::DeviceId>, CC: IcmpEchoBoundSt
         info: &mut LocalDeliveryPacketInfo<I, H>,
         _early_demux_socket: Option<Never>,
     ) -> Result<(), (B, I::IcmpError)> {
-        let LocalDeliveryPacketInfo { meta, header_info: _, marks: _ } = info;
-        let ReceiveIpPacketMeta { broadcast: _, transparent_override, parsing_context: _ } = meta;
+        let LocalDeliveryPacketInfo { meta, header_info: _, marks: _, frame_storage: _ } = info;
+        let ReceiveIpPacketMeta { broadcast: _, transparent_override, parsing_context: _, frame_storage: _ } = meta;
         if let Some(delivery) = transparent_override.as_ref() {
             unreachable!(
                 "cannot perform transparent local delivery {delivery:?} to an ICMP socket; \

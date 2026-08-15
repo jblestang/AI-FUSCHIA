@@ -2,114 +2,101 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Zero-copy UDP receive payload storage.
+//! View-only UDP receive payload storage (no payload copies).
 
 use alloc::sync::Arc;
 use core::fmt;
+use core::ops::Range;
 
-use packet::Buf;
+use netstack3_ip::PacketSegment;
+use packet::ParseMetadata;
+use packet::{BufferMut, FragmentedBytes, ParseBuffer as _};
 
-/// Payload bytes delivered to a UDP socket.
+/// Payload bytes delivered to a UDP socket as a range view into shared RX storage.
 ///
-/// Backed by [`Arc`] so multicast / multi-recipient delivery can fan out with
-/// refcount-only sharing instead of copying the datagram body.
+/// Fan-out (multicast / multiple sockets) clones the view (Arc refcount + range only).
 #[derive(Clone, PartialEq, Eq)]
 pub struct UdpReceiveBuffer {
-    bytes: Arc<[u8]>,
+    segment: PacketSegment,
 }
 
 impl fmt::Debug for UdpReceiveBuffer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("UdpReceiveBuffer").field("len", &self.bytes.len()).finish_non_exhaustive()
+        f.debug_struct("UdpReceiveBuffer").field("len", &self.segment.len()).finish_non_exhaustive()
     }
 }
 
 impl UdpReceiveBuffer {
-    /// Wraps already-shared payload bytes.
-    pub fn from_arc(bytes: Arc<[u8]>) -> Self {
-        Self { bytes }
+    /// Builds a payload view over shared storage.
+    pub fn view(segment: PacketSegment) -> Self {
+        Self { segment }
     }
 
-    /// Placeholder payload for `bench-receive` (no bytes copied or allocated per packet).
-    #[cfg(feature = "bench-receive")]
-    #[allow(static_mut_refs)]
-    pub fn bench_receive_placeholder() -> Self {
-        static mut PLACEHOLDER: Option<Arc<[u8]>> = None;
-        unsafe {
-            if PLACEHOLDER.is_none() {
-                PLACEHOLDER = Some(Arc::from([]));
-            }
-            Self::from_arc(Arc::clone(PLACEHOLDER.as_ref().unwrap()))
-        }
-    }
-
-    /// Moves an owned vec into shared storage without copying payload bytes.
-    pub fn from_vec(vec: alloc::vec::Vec<u8>) -> Self {
-        Self { bytes: vec.into() }
-    }
-
-    /// Takes the UDP payload out of a [`Buf`] after parsing (zero-copy move).
-    pub fn from_buf(buffer: Buf<alloc::vec::Vec<u8>>) -> Self {
-        Self::from_vec(buffer.into_inner())
-    }
-
-    /// Copies `body` once into shared storage.
-    ///
-    /// Used when the underlying RX buffer is reused (e.g. benchmark hot loop).
-    pub fn from_slice(body: &[u8]) -> Self {
-        Self { bytes: Arc::from(body) }
-    }
-
-    /// Returns the payload as a slice.
-    pub fn as_slice(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    /// Returns a refcount bump suitable for fan-out delivery.
-    pub fn share(&self) -> Self {
-        Self { bytes: Arc::clone(&self.bytes) }
-    }
-
-    /// Consumes the buffer and returns the underlying shared storage.
-    pub fn into_arc(self) -> Arc<[u8]> {
-        self.bytes
-    }
-
-    /// Builds a payload from a post-IP transport buffer (one move, no byte copy).
-    pub fn from_transport_buffer(buffer: Buf<alloc::vec::Vec<u8>>) -> Self {
-        Self::from_buf(buffer)
-    }
-
-    /// Takes the UDP payload out of an owned transport buffer after parsing.
-    ///
-    /// Restores the full datagram with [`GrowBuffer::undo_parse`], strips the UDP
-    /// header, and moves the payload bytes into shared storage without copying.
-    pub fn from_parsed_transport_buffer(
-        buffer: &mut Buf<alloc::vec::Vec<u8>>,
-        parse_meta: packet::ParseMetadata,
+    /// Views the UDP payload within `storage` using post-parse UDP metadata.
+    pub fn payload_view(
+        storage: Arc<[u8]>,
+        transport_range: Range<usize>,
+        parse_meta: ParseMetadata,
     ) -> Self {
-        use packet::{GrowBuffer as _, ShrinkBuffer as _};
-        let header_len = parse_meta.header_len();
-        buffer.undo_parse(parse_meta);
-        buffer.shrink_front(header_len);
-        Self::from_transport_buffer(core::mem::replace(buffer, Buf::new(alloc::vec![], ..0)))
+        let start = transport_range.start + parse_meta.header_len();
+        let end = start + parse_meta.body_len();
+        Self::view(PacketSegment::view_in(storage, start..end))
+    }
+
+    /// Placeholder for `bench-receive` (no storage touched).
+    #[cfg(feature = "bench-receive")]
+    pub fn bench_receive_placeholder() -> Self {
+        Self::view(netstack3_ip::PacketSegment::view_in(Arc::from([]), 0..0))
+    }
+
+    /// Returns the payload as a contiguous slice (zero-copy borrow of shared storage).
+    pub fn as_slice(&self) -> &[u8] {
+        self.segment.as_slice()
+    }
+
+    /// Returns a refcount-only clone suitable for fan-out delivery.
+    pub fn share(&self) -> Self {
+        Self { segment: self.segment.clone() }
+    }
+
+    /// Returns the underlying segment view.
+    pub fn segment(&self) -> &PacketSegment {
+        &self.segment
+    }
+
+    /// Invokes `f` with payload bytes as a [`FragmentedBytes`] view.
+    pub fn with_payload<R, F>(&self, f: F) -> R
+    where
+        F: for<'b> FnOnce(FragmentedBytes<'b, '_>) -> R,
+    {
+        let slice = self.segment.as_slice();
+        let mut slices = [slice];
+        f(FragmentedBytes::new(&mut slices))
     }
 }
 
-impl From<alloc::vec::Vec<u8>> for UdpReceiveBuffer {
-    fn from(vec: alloc::vec::Vec<u8>) -> Self {
-        Self::from_vec(vec)
-    }
-}
-
+/// Test-only: captures bytes into shared storage (one allocation).
+#[cfg(any(test, feature = "testutils"))]
 impl From<&[u8]> for UdpReceiveBuffer {
     fn from(slice: &[u8]) -> Self {
-        Self::from_slice(slice)
+        Self::view(PacketSegment::capture(slice))
     }
 }
 
+#[cfg(any(test, feature = "testutils"))]
 impl<const N: usize> From<[u8; N]> for UdpReceiveBuffer {
     fn from(arr: [u8; N]) -> Self {
-        Self::from_vec(arr.to_vec())
+        Self::view(PacketSegment::capture(&arr))
     }
+}
+
+/// Computes the transport-layer byte range within pinned storage for a parsed buffer view.
+pub fn transport_range_in_storage<B: BufferMut>(
+    storage: &Arc<[u8]>,
+    buffer: &B,
+) -> Range<usize> {
+    let slice = buffer.as_ref();
+    let storage = storage.as_ref();
+    let start = slice.as_ptr() as usize - storage.as_ptr() as usize;
+    start..start + slice.len()
 }

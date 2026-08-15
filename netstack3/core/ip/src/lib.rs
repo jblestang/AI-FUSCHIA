@@ -21,6 +21,7 @@ extern crate alloc;
 mod internal {
     #[macro_use]
     pub(super) mod path_mtu;
+    pub(super) mod pinned_frame;
 
     pub(super) mod api;
     pub(super) mod base;
@@ -259,7 +260,10 @@ pub use internal::local_delivery::{
     IpHeaderInfo, LocalDeliveryPacketInfo, ReceiveIpPacketMeta, TransparentLocalDelivery,
 };
 pub use internal::path_mtu::{PmtuCache, PmtuContext};
-pub use internal::reassembly::{FragmentContext, FragmentTimerId, IpPacketFragmentCache};
+pub use internal::pinned_frame::{IntoPinnedFrame, PinnedFrameBuffer, RxFrameStorage};
+pub use internal::fragment_chain::{
+    LayerRanges, PacketSegment, ReassembledChain, ReassembledChainBuffer, SharedPacketView,
+};
 pub use internal::routing::rules::{
     Rule, RuleAction, RuleMatcher, RulesTable, TrafficOriginMatcher,
 };
