@@ -109,6 +109,14 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for NoopIpsBindings {
         self.datagrams += 1;
         Ok(())
     }
+
+    fn receive_tcp_segment(
+        &mut self,
+        _device_id: &FakeDeviceId,
+        _view: crate::view::ReceivedTcpSegmentView,
+    ) -> Result<(), IpsReceiveError> {
+        Ok(())
+    }
 }
 
 /// How [`OverwriteIpsBindings`] rewrites the UDP payload after ingress.
@@ -159,6 +167,14 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for OverwriteIpsBindings {
             }
         }
         self.datagrams += 1;
+        Ok(())
+    }
+
+    fn receive_tcp_segment(
+        &mut self,
+        _device_id: &FakeDeviceId,
+        _view: crate::view::ReceivedTcpSegmentView,
+    ) -> Result<(), IpsReceiveError> {
         Ok(())
     }
 }
@@ -316,6 +332,14 @@ fn deliver_udp_view(template: &[u8]) -> ReceivedUdpDatagramView {
             view: ReceivedUdpDatagramView,
         ) -> Result<(), IpsReceiveError> {
             self.view = Some(view);
+            Ok(())
+        }
+
+        fn receive_tcp_segment(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            _view: crate::view::ReceivedTcpSegmentView,
+        ) -> Result<(), IpsReceiveError> {
             Ok(())
         }
     }

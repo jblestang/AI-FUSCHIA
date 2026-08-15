@@ -15,13 +15,16 @@ use packet::Buf;
 use packet_formats::ip::IpProto;
 
 use crate::view::{FragmentEvent, IpFragmentInfo, IpFragmentMetadata, ReassemblyOutcome};
+use crate::tcp_flow::IpsTcpFlowTable;
 
 /// IPS layer state.
 #[derive(Debug)]
 pub struct IpsState {
     pub(crate) ipv4: IpsFragmentCache<Ipv4>,
     pub(crate) ipv6: IpsFragmentCache<Ipv6>,
-    /// When true, UDP ingress is delivered via the IPS zero-copy path.
+    /// TCP flow state for sequence/ACK mangling.
+    pub tcp_flows: IpsTcpFlowTable,
+    /// When true, IPS ingress is delivered via the zero-copy path.
     pub enabled: bool,
 }
 
@@ -37,6 +40,7 @@ impl Default for IpsState {
         Self {
             ipv4: IpsFragmentCache::new(),
             ipv6: IpsFragmentCache::new(),
+            tcp_flows: IpsTcpFlowTable::new(),
             enabled: false,
         }
     }

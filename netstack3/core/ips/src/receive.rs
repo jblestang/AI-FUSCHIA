@@ -22,7 +22,8 @@ use crate::state::{
     assembly_metadata, ip_addr_v4, ip_addr_v6, AssemblyProgress, DatagramAssembly, IpsState,
 };
 use crate::view::{
-    IpFragmentInfo, IpFragmentMetadata, ReceivedUdpDatagramView, ReassemblyOutcome, UdpHeaderView,
+    IpFragmentInfo, IpFragmentMetadata, ReceivedTcpSegmentView, ReceivedUdpDatagramView,
+    ReassemblyOutcome, TcpHeaderView, UdpHeaderView, parse_tcp_header,
 };
 
 /// Processes one owned Ethernet frame on the IPS ingress path.
@@ -65,15 +66,16 @@ where
     BC: IpsReceiveBindingsContext<D>,
 {
     let mut ip_bytes = &frame.as_ref()[ip_offset..];
-    let (src, dst, id, offset, mf, ip_packet_end, body_start) = {
+    let (src, dst, id, offset, mf, ip_packet_end, body_start, proto) = {
         let packet = match Ipv4Packet::parse(&mut ip_bytes, ()) {
             Ok(p) => p,
             Err(_) => return Err(frame),
         };
 
-        if !matches!(packet.proto(), Ipv4Proto::Proto(IpProto::Udp)) {
-            return Err(frame);
-        }
+        let proto = match packet.proto() {
+            Ipv4Proto::Proto(p @ (IpProto::Udp | IpProto::Tcp)) => p,
+            _ => return Err(frame),
+        };
 
         let meta = ParsablePacket::parse_metadata(&packet);
         let ip_packet_end = ip_offset + meta.header_len() + meta.body_len();
@@ -86,22 +88,36 @@ where
             packet.mf_flag(),
             ip_packet_end,
             body_start,
+            proto,
         )
     };
 
     let fragmented = mf || offset != 0;
 
     if !fragmented {
-        return deliver_unfragmented_v4(
-            bindings_ctx,
-            device_id,
-            frame,
-            ip_offset,
-            src,
-            dst,
-            id,
-            body_start,
-        );
+        return match proto {
+            IpProto::Udp => deliver_unfragmented_udp_v4(
+                bindings_ctx,
+                device_id,
+                frame,
+                ip_offset,
+                src,
+                dst,
+                id,
+                body_start,
+            ),
+            IpProto::Tcp => deliver_unfragmented_tcp_v4(
+                bindings_ctx,
+                device_id,
+                frame,
+                ip_offset,
+                src,
+                dst,
+                id,
+                body_start,
+            ),
+            _ => Err(frame),
+        };
     }
 
     let stored = store_fragment(
@@ -113,11 +129,11 @@ where
         body_start..ip_packet_end,
     );
 
-    let key = ipv4_key(src, dst, id);
+    let key = ipv4_key(src, dst, id, proto);
     match add_fragment(&state.ipv4, key, stored) {
         AssemblyProgress::NeedMore => Ok(()),
         AssemblyProgress::Ready(assembly) => {
-            deliver_assembly_v4(bindings_ctx, device_id, assembly, ReassemblyOutcome::Complete);
+            deliver_assembly_v4(bindings_ctx, device_id, assembly, ReassemblyOutcome::Complete, proto);
             Ok(())
         }
         AssemblyProgress::Aborted(assembly) => {
@@ -126,6 +142,7 @@ where
                 device_id,
                 assembly,
                 ReassemblyOutcome::AbortedRfc5722Overlap,
+                proto,
             );
             Ok(())
         }
@@ -151,9 +168,9 @@ where
             Err(_) => return Err(frame),
         };
 
-        let is_udp = matches!(packet.proto(), Ipv6Proto::Proto(IpProto::Udp)) || is_fragment;
+        let is_l4 = matches!(packet.proto(), Ipv6Proto::Proto(IpProto::Udp | IpProto::Tcp)) || is_fragment;
 
-        if !is_udp {
+        if !is_l4 {
             return Err(frame);
         }
 
@@ -175,7 +192,7 @@ fn ipv6_fragment_info(_frame: &[u8], _ip_offset: usize) -> (u16, bool, u32, bool
     (0, false, 0, false)
 }
 
-fn deliver_unfragmented_v4<D, BC>(
+fn deliver_unfragmented_udp_v4<D, BC>(
     bindings_ctx: &mut BC,
     device_id: &D,
     frame: Buf<Vec<u8>>,
@@ -228,6 +245,55 @@ where
     );
 
     let _ = bindings_ctx.receive_udp_datagram(device_id, view);
+    Ok(())
+}
+
+fn deliver_unfragmented_tcp_v4<D, BC>(
+    bindings_ctx: &mut BC,
+    device_id: &D,
+    frame: Buf<Vec<u8>>,
+    ip_offset: usize,
+    src: net_types::ip::Ipv4Addr,
+    dst: net_types::ip::Ipv4Addr,
+    identification: u32,
+    body_start: usize,
+) -> Result<(), Buf<Vec<u8>>>
+where
+    D: StrongDeviceIdentifier,
+    BC: IpsReceiveBindingsContext<D>,
+{
+    let frame_len = frame.as_ref().len();
+    let tcp_hdr = match parse_tcp_header(frame.as_ref(), 0, body_start) {
+        Some(hdr) => hdr,
+        None => return Err(frame),
+    };
+    let payload_start = tcp_hdr.header_range.end;
+    let payload_parts = if payload_start < frame_len {
+        alloc::vec![(0, payload_start..frame_len)]
+    } else {
+        alloc::vec![]
+    };
+    let view = ReceivedTcpSegmentView::new(
+        alloc::vec![frame],
+        alloc::vec![IpFragmentInfo {
+            eth_frame_index: 0,
+            ip_packet_range: ip_offset..frame_len,
+            identification,
+            fragment_offset: 0,
+            more_fragments: false,
+            ip_body_range: body_start..frame_len,
+        }],
+        IpFragmentMetadata {
+            reassembly_outcome: ReassemblyOutcome::NotApplicable,
+            ..Default::default()
+        },
+        Some(tcp_hdr),
+        payload_parts,
+        IpAddr::V4(src),
+        IpAddr::V4(dst),
+    );
+
+    let _ = bindings_ctx.receive_tcp_segment(device_id, view);
     Ok(())
 }
 
@@ -291,12 +357,13 @@ fn deliver_assembly_v4<D, BC>(
     device_id: &D,
     assembly: DatagramAssembly<Ipv4>,
     outcome: ReassemblyOutcome,
+    proto: IpProto,
 ) where
     D: StrongDeviceIdentifier,
     BC: IpsReceiveBindingsContext<D>,
 {
     let (src, dst) = ip_addr_v4(assembly.src_ip, assembly.dst_ip);
-    deliver_assembly_impl(bindings_ctx, device_id, assembly, outcome, src, dst);
+    deliver_assembly_impl(bindings_ctx, device_id, assembly, outcome, src, dst, proto);
 }
 
 fn deliver_assembly_v6<D, BC>(
@@ -309,7 +376,7 @@ fn deliver_assembly_v6<D, BC>(
     BC: IpsReceiveBindingsContext<D>,
 {
     let (src, dst) = ip_addr_v6(assembly.src_ip, assembly.dst_ip);
-    deliver_assembly_impl(bindings_ctx, device_id, assembly, outcome, src, dst);
+    deliver_assembly_impl(bindings_ctx, device_id, assembly, outcome, src, dst, IpProto::Udp);
 }
 
 fn deliver_assembly_impl<I, D, BC>(
@@ -319,6 +386,7 @@ fn deliver_assembly_impl<I, D, BC>(
     outcome: ReassemblyOutcome,
     src: IpAddr,
     dst: IpAddr,
+    proto: IpProto,
 ) where
     I: Ip,
     D: StrongDeviceIdentifier,
@@ -340,24 +408,45 @@ fn deliver_assembly_impl<I, D, BC>(
         eth_frames.push(f.eth_frame);
     }
 
-    let (udp_header, payload_parts) = if outcome == ReassemblyOutcome::Complete {
-        build_udp_views(&eth_frames, &fragment_infos)
-    } else {
-        (None, Vec::new())
-    };
-
-    let view = ReceivedUdpDatagramView::new(
-        eth_frames,
-        fragment_infos,
-        metadata,
-        udp_header,
-        payload_parts,
-        src,
-        dst,
-    );
-
-    trace!("ips: delivering UDP datagram to L7, outcome={:?}", outcome);
-    let _ = bindings_ctx.receive_udp_datagram(device_id, view);
+    match proto {
+        IpProto::Udp => {
+            let (udp_header, payload_parts) = if outcome == ReassemblyOutcome::Complete {
+                build_udp_views(&eth_frames, &fragment_infos)
+            } else {
+                (None, Vec::new())
+            };
+            let view = ReceivedUdpDatagramView::new(
+                eth_frames,
+                fragment_infos,
+                metadata,
+                udp_header,
+                payload_parts,
+                src,
+                dst,
+            );
+            trace!("ips: delivering UDP datagram to L7, outcome={:?}", outcome);
+            let _ = bindings_ctx.receive_udp_datagram(device_id, view);
+        }
+        IpProto::Tcp => {
+            let (tcp_header, payload_parts) = if outcome == ReassemblyOutcome::Complete {
+                build_tcp_views(&eth_frames, &fragment_infos)
+            } else {
+                (None, Vec::new())
+            };
+            let view = ReceivedTcpSegmentView::new(
+                eth_frames,
+                fragment_infos,
+                metadata,
+                tcp_header,
+                payload_parts,
+                src,
+                dst,
+            );
+            trace!("ips: delivering TCP segment to L7, outcome={:?}", outcome);
+            let _ = bindings_ctx.receive_tcp_segment(device_id, view);
+        }
+        _ => {}
+    }
 }
 
 fn build_udp_views(
@@ -401,6 +490,38 @@ fn build_udp_views(
     (udp_header, payload_parts)
 }
 
+fn build_tcp_views(
+    eth_frames: &[Buf<Vec<u8>>],
+    fragments: &[IpFragmentInfo],
+) -> (Option<TcpHeaderView>, Vec<(usize, Range<usize>)>) {
+    let mut sorted: Vec<(u16, usize)> =
+        fragments.iter().enumerate().map(|(i, f)| (f.fragment_offset, i)).collect();
+    sorted.sort_by_key(|(offset, _)| *offset);
+
+    let mut tcp_header = None;
+    let mut payload_parts = Vec::new();
+
+    for (offset, idx) in sorted {
+        let info = &fragments[idx];
+        let body = &info.ip_body_range;
+
+        if offset == 0 {
+            let frame = &eth_frames[info.eth_frame_index];
+            if let Some(hdr) = parse_tcp_header(frame.as_ref(), info.eth_frame_index, body.start) {
+                let payload_start = hdr.header_range.end;
+                tcp_header = Some(hdr);
+                if payload_start < body.end {
+                    payload_parts.push((info.eth_frame_index, payload_start..body.end));
+                }
+            }
+        } else if body.start < body.end {
+            payload_parts.push((info.eth_frame_index, body.clone()));
+        }
+    }
+
+    (tcp_header, payload_parts)
+}
+
 #[cfg(test)]
 mod tests {
     use core::num::NonZeroU16;
@@ -415,6 +536,7 @@ mod tests {
     use packet::{Buf, NestableSerializer as _, Serializer};
     use packet_formats::ethernet::{EtherType, EthernetFrameBuilder};
     use packet_formats::ip::{IpProto, Ipv4Proto};
+    use packet_formats::tcp::TcpSegmentBuilder;
     use packet_formats::udp::UdpPacketBuilder;
 
     use super::*;
@@ -490,6 +612,14 @@ mod tests {
             self.views.push(view);
             Ok(())
         }
+
+        fn receive_tcp_segment(
+            &mut self,
+            _device: &FakeDeviceId,
+            _view: ReceivedTcpSegmentView,
+        ) -> Result<(), IpsReceiveError> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -549,5 +679,72 @@ mod tests {
             );
             assert_eq!(view.payload_slices().iter().map(|s| s.len()).sum::<usize>(), PAYLOAD_LEN);
         }
+    }
+
+    #[test]
+    fn delivers_unfragmented_tcp_segment_to_l7() {
+        const PAYLOAD_LEN: usize = 64;
+        let tcp = TcpSegmentBuilder::new(
+            remote(2),
+            DST,
+            REMOTE_PORT,
+            LOCAL_PORT,
+            1000,
+            None,
+            65535,
+        );
+        let ip = packet_formats::ipv4::Ipv4PacketBuilder::new(
+            remote(2),
+            DST,
+            64,
+            Ipv4Proto::Proto(IpProto::Tcp),
+        );
+        let eth = packet_formats::ethernet::EthernetFrameBuilder::new(
+            SRC_MAC,
+            DST_MAC,
+            EtherType::Ipv4,
+            0,
+        );
+        let frame = Buf::new(vec![0xCC; PAYLOAD_LEN], ..)
+            .wrap_in(tcp)
+            .wrap_in(ip)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner();
+
+        struct TcpCapture {
+            views: Vec<ReceivedTcpSegmentView>,
+        }
+
+        impl IpsReceiveBindingsContext<FakeDeviceId> for TcpCapture {
+            fn receive_udp_datagram(
+                &mut self,
+                _device: &FakeDeviceId,
+                _view: ReceivedUdpDatagramView,
+            ) -> Result<(), IpsReceiveError> {
+                Ok(())
+            }
+
+            fn receive_tcp_segment(
+                &mut self,
+                _device: &FakeDeviceId,
+                view: ReceivedTcpSegmentView,
+            ) -> Result<(), IpsReceiveError> {
+                self.views.push(view);
+                Ok(())
+            }
+        }
+
+        let state = IpsState::new();
+        let mut handler = TcpCapture { views: Vec::new() };
+        process_ethernet_frame(&state, &mut handler, &FakeDeviceId, Buf::new(frame, ..)).unwrap();
+
+        assert_eq!(handler.views.len(), 1);
+        let view = &handler.views[0];
+        assert!(view.tcp_header().is_some());
+        assert_eq!(view.payload_len(), PAYLOAD_LEN);
+        assert_eq!(view.tcp_header().unwrap().seq_num, 1000);
     }
 }

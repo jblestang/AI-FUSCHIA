@@ -1408,6 +1408,15 @@ impl IpsReceiveBindingsContext<DeviceId<Self>> for FakeBindingsCtx {
         let _ = view;
         Ok(())
     }
+
+    fn receive_tcp_segment(
+        &mut self,
+        _device_id: &DeviceId<Self>,
+        view: netstack3_ips::ReceivedTcpSegmentView,
+    ) -> Result<(), IpsReceiveError> {
+        let _ = view;
+        Ok(())
+    }
 }
 
 impl UdpBindingsTypes for FakeBindingsCtx {

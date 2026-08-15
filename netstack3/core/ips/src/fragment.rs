@@ -238,8 +238,9 @@ pub fn ipv4_key(
     src: net_types::ip::Ipv4Addr,
     dst: net_types::ip::Ipv4Addr,
     id: u32,
+    proto: IpProto,
 ) -> AssemblyKey<Ipv4> {
-    AssemblyKey::new(src, dst, id, IpProto::Udp)
+    AssemblyKey::new(src, dst, id, proto)
 }
 
 /// Creates an assembly key for IPv6.
@@ -247,8 +248,9 @@ pub fn ipv6_key(
     src: net_types::ip::Ipv6Addr,
     dst: net_types::ip::Ipv6Addr,
     id: u32,
+    proto: IpProto,
 ) -> AssemblyKey<Ipv6> {
-    AssemblyKey::new(src, dst, id, IpProto::Udp)
+    AssemblyKey::new(src, dst, id, proto)
 }
 
 #[cfg(test)]
@@ -267,11 +269,20 @@ mod tests {
     }
 
     #[test]
+    fn udp_and_tcp_assemblies_use_distinct_cache_keys() {
+        let src = Ipv4Addr::new([1, 0, 0, 1]);
+        let dst = Ipv4Addr::new([2, 0, 0, 1]);
+        let udp_key = ipv4_key(src, dst, 42, IpProto::Udp);
+        let tcp_key = ipv4_key(src, dst, 42, IpProto::Tcp);
+        assert_ne!(udp_key, tcp_key);
+    }
+
+    #[test]
     fn rfc5722_overlap_aborts() {
         let cache = IpsFragmentCache::<Ipv4>::new();
         let src = Ipv4Addr::new([1, 0, 0, 1]);
         let dst = Ipv4Addr::new([2, 0, 0, 1]);
-        let key = ipv4_key(src, dst, 5);
+        let key = ipv4_key(src, dst, 5, IpProto::Udp);
 
         assert!(matches!(
             add_fragment(&cache, key, stored(12, 104, true, 5)),

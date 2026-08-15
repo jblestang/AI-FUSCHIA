@@ -612,6 +612,14 @@ mod tests {
                 self.view = Some(view);
                 Ok(())
             }
+
+            fn receive_tcp_segment(
+                &mut self,
+                _device: &FakeDeviceId,
+                _view: crate::view::ReceivedTcpSegmentView,
+            ) -> Result<(), IpsReceiveError> {
+                Ok(())
+            }
         }
 
         let state = IpsState::new();

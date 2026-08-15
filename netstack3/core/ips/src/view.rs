@@ -5,11 +5,12 @@
 //! Multi-layer zero-copy views delivered to Layer 7 IPS analysis.
 
 use alloc::vec::Vec;
-use core::mem;
 use core::ops::Range;
 
 use net_types::ip::{IpAddr, Ipv4Addr, Ipv6Addr};
-use packet::{Buf, BufferMut, FragmentedByteSlice};
+use packet::{Buf, FragmentedByteSlice};
+
+use crate::frame_store::EthFrameStore;
 
 /// Metadata describing IP fragment reception and reassembly per RFC 5722.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,8 +101,7 @@ struct PayloadPart {
 /// stored in [`ReceivedUdpDatagramView::eth_frames`]. No payload bytes are
 /// cloned on the receive path.
 pub struct ReceivedUdpDatagramView {
-    /// Owned Ethernet frame buffers (driver RX memory).
-    eth_frames: Vec<Buf<Vec<u8>>>,
+    frames: EthFrameStore,
     ip_fragments: Vec<IpFragmentInfo>,
     fragment_metadata: IpFragmentMetadata,
     udp_header: Option<UdpHeaderView>,
@@ -122,7 +122,7 @@ impl ReceivedUdpDatagramView {
         dst_ip: IpAddr,
     ) -> Self {
         Self {
-            eth_frames,
+            frames: EthFrameStore::from_frames(eth_frames),
             ip_fragments,
             fragment_metadata,
             udp_header,
@@ -152,7 +152,7 @@ impl ReceivedUdpDatagramView {
 
     /// Underlying Ethernet frame buffers.
     pub fn eth_frames(&self) -> impl Iterator<Item = &[u8]> + '_ {
-        self.eth_frames.iter().map(|f| f.as_ref())
+        self.frames.eth_frames()
     }
 
     /// Parsed UDP header, if reassembly completed per RFC 5722.
@@ -177,7 +177,7 @@ impl ReceivedUdpDatagramView {
         let parts = self.payload_parts.len();
         assert!(scratch.len() >= parts);
         for (i, part) in self.payload_parts.iter().enumerate() {
-            scratch[i] = &self.eth_frames[part.eth_frame_index].as_ref()[part.range.clone()];
+            scratch[i] = &self.frames.frames()[part.eth_frame_index].as_ref()[part.range.clone()];
         }
         FragmentedByteSlice::new(&mut scratch[..parts])
     }
@@ -203,7 +203,7 @@ impl<'a> PayloadSliceView<'a> {
     /// Iterates payload slices in reassembly order.
     pub fn iter(&self) -> impl Iterator<Item = &'a [u8]> + 'a {
         self.view.payload_parts.iter().map(|part| {
-            &self.view.eth_frames[part.eth_frame_index].as_ref()[part.range.clone()]
+            &self.view.frames.frames()[part.eth_frame_index].as_ref()[part.range.clone()]
         })
     }
 }
@@ -227,25 +227,12 @@ impl ReceivedUdpDatagramView {
 
     /// Truncates a stored frame buffer to `new_len` bytes (no-op if already shorter).
     pub(crate) fn truncate_eth_frame(&mut self, index: usize, new_len: usize) -> bool {
-        let Some(frame) = self.eth_frames.get_mut(index) else {
-            return false;
-        };
-        if frame.as_ref().len() <= new_len {
-            return true;
-        }
-        let placeholder = Buf::new(Vec::new(), 0..0);
-        let (mut buf, body) = mem::replace(frame, placeholder).into_parts();
-        buf.truncate(new_len);
-        let body_start = body.start.min(new_len);
-        *frame = Buf::new(buf, body_start..new_len);
-        true
+        self.frames.truncate_eth_frame(index, new_len)
     }
 
     /// Drops Ethernet frame buffers after `keep_through_index` (inclusive).
     pub(crate) fn retain_eth_frames_through(&mut self, keep_through_index: usize) {
-        if keep_through_index + 1 < self.eth_frames.len() {
-            self.eth_frames.truncate(keep_through_index + 1);
-        }
+        self.frames.retain_eth_frames_through(keep_through_index);
     }
 
     /// Updates view metadata after shrinking to one unfragmented IPv4 frame in place.
@@ -291,8 +278,10 @@ impl ReceivedUdpDatagramView {
         if part.range.len() != data.len() {
             return false;
         }
-        let frame = &mut self.eth_frames[part.eth_frame_index];
-        frame.as_mut()[part.range.clone()].copy_from_slice(data);
+        let Some(frame) = self.frames.eth_frame_buf_mut(part.eth_frame_index) else {
+            return false;
+        };
+        frame[part.range.clone()].copy_from_slice(data);
         true
     }
 
@@ -303,23 +292,209 @@ impl ReceivedUdpDatagramView {
     }
 
     pub(crate) fn eth_frame_buf_mut(&mut self, index: usize) -> Option<&mut [u8]> {
-        Some(self.eth_frames.get_mut(index)?.as_mut())
+        self.frames.eth_frame_buf_mut(index)
     }
 
     pub(crate) fn eth_frame_buf(&self, index: usize) -> Option<&[u8]> {
-        Some(self.eth_frames.get(index)?.as_ref())
+        self.frames.eth_frame_buf(index)
     }
 
     pub(crate) fn ensure_eth_frame_len(&mut self, index: usize, min_len: usize) -> bool {
-        let Some(frame) = self.eth_frames.get(index) else {
-            return false;
-        };
-        if frame.as_ref().len() >= min_len {
-            return true;
-        }
-        let mut bytes = frame.as_ref().to_vec();
-        bytes.resize(min_len, 0);
-        self.eth_frames[index] = Buf::new(bytes, ..);
-        true
+        self.frames.ensure_eth_frame_len(index, min_len)
     }
+}
+
+/// Parsed TCP header fields and their location within a stored frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TcpHeaderView {
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub seq_num: u32,
+    pub ack_num: u32,
+    pub ack_flag: bool,
+    pub data_offset_bytes: u8,
+    pub window: u16,
+    pub eth_frame_index: usize,
+    pub header_range: Range<usize>,
+}
+
+/// Zero-copy view of a received TCP segment for IPS analysis.
+pub struct ReceivedTcpSegmentView {
+    frames: EthFrameStore,
+    ip_fragments: Vec<IpFragmentInfo>,
+    fragment_metadata: IpFragmentMetadata,
+    tcp_header: Option<TcpHeaderView>,
+    payload_parts: Vec<PayloadPart>,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+}
+
+impl ReceivedTcpSegmentView {
+    pub(crate) fn new(
+        eth_frames: Vec<Buf<Vec<u8>>>,
+        ip_fragments: Vec<IpFragmentInfo>,
+        fragment_metadata: IpFragmentMetadata,
+        tcp_header: Option<TcpHeaderView>,
+        payload_parts: Vec<(usize, Range<usize>)>,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+    ) -> Self {
+        Self {
+            frames: EthFrameStore::from_frames(eth_frames),
+            ip_fragments,
+            fragment_metadata,
+            tcp_header,
+            payload_parts: payload_parts
+                .into_iter()
+                .map(|(eth_frame_index, range)| PayloadPart { eth_frame_index, range })
+                .collect(),
+            src_ip,
+            dst_ip,
+        }
+    }
+
+    pub fn addrs(&self) -> (IpAddr, IpAddr) {
+        (self.src_ip, self.dst_ip)
+    }
+
+    pub fn ip_fragment_metadata(&self) -> &IpFragmentMetadata {
+        &self.fragment_metadata
+    }
+
+    pub fn ip_fragments(&self) -> &[IpFragmentInfo] {
+        &self.ip_fragments
+    }
+
+    pub fn eth_frames(&self) -> impl Iterator<Item = &[u8]> + '_ {
+        self.frames.eth_frames()
+    }
+
+    pub fn tcp_header(&self) -> Option<&TcpHeaderView> {
+        self.tcp_header.as_ref()
+    }
+
+    pub fn payload_slices(&self) -> TcpPayloadSliceView<'_> {
+        TcpPayloadSliceView { view: self }
+    }
+
+    pub fn src_ipv4(&self) -> Option<Ipv4Addr> {
+        match self.src_ip {
+            IpAddr::V4(v4) => Some(v4),
+            IpAddr::V6(_) => None,
+        }
+    }
+
+    pub fn payload_len(&self) -> usize {
+        self.payload_parts.iter().map(|p| p.range.len()).sum()
+    }
+
+    pub(crate) fn wire_payload_end(&self) -> Option<usize> {
+        self.payload_parts.iter().map(|p| p.range.end).max()
+    }
+
+    pub(crate) fn truncate_eth_frame(&mut self, index: usize, new_len: usize) -> bool {
+        self.frames.truncate_eth_frame(index, new_len)
+    }
+
+    pub(crate) fn retain_eth_frames_through(&mut self, keep_through_index: usize) {
+        self.frames.retain_eth_frames_through(keep_through_index);
+    }
+
+    pub(crate) fn eth_frame_buf_mut(&mut self, index: usize) -> Option<&mut [u8]> {
+        self.frames.eth_frame_buf_mut(index)
+    }
+
+    pub(crate) fn eth_frame_buf(&self, index: usize) -> Option<&[u8]> {
+        self.frames.eth_frame_buf(index)
+    }
+
+    pub(crate) fn ensure_eth_frame_len(&mut self, index: usize, min_len: usize) -> bool {
+        self.frames.ensure_eth_frame_len(index, min_len)
+    }
+
+    pub(crate) fn apply_single_frame_length_change(
+        &mut self,
+        frame_index: usize,
+        ip_packet_range: Range<usize>,
+        ip_body_range: Range<usize>,
+        payload_range: Range<usize>,
+    ) {
+        let identification = self.ip_fragments.first().map(|f| f.identification).unwrap_or(0);
+        let ip_fragment = IpFragmentInfo {
+            eth_frame_index: frame_index,
+            ip_packet_range,
+            identification,
+            fragment_offset: 0,
+            more_fragments: false,
+            ip_body_range,
+        };
+        self.ip_fragments = alloc::vec![ip_fragment.clone()];
+        self.fragment_metadata.fragments = alloc::vec![ip_fragment];
+        self.fragment_metadata.reassembly_outcome = ReassemblyOutcome::NotApplicable;
+        self.fragment_metadata.events.clear();
+        if let Some(hdr) = self.tcp_header.as_mut() {
+            hdr.eth_frame_index = frame_index;
+        }
+        self.payload_parts = alloc::vec![PayloadPart {
+            eth_frame_index: frame_index,
+            range: payload_range,
+        }];
+    }
+}
+
+pub struct TcpPayloadSliceView<'a> {
+    view: &'a ReceivedTcpSegmentView,
+}
+
+impl<'a> TcpPayloadSliceView<'a> {
+    pub fn len(&self) -> usize {
+        self.view.payload_parts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.view.payload_parts.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &'a [u8]> + 'a {
+        self.view.payload_parts.iter().map(|part| {
+            &self.view.frames.frames()[part.eth_frame_index].as_ref()[part.range.clone()]
+        })
+    }
+}
+
+/// Parses a TCP header from frame bytes; returns None if too short.
+pub(crate) fn parse_tcp_header(
+    frame: &[u8],
+    eth_frame_index: usize,
+    tcp_start: usize,
+) -> Option<TcpHeaderView> {
+    if frame.len() < tcp_start + 20 {
+        return None;
+    }
+    let data_offset = (frame[tcp_start + 12] >> 4) as usize * 4;
+    if frame.len() < tcp_start + data_offset {
+        return None;
+    }
+    let flags = frame[tcp_start + 13];
+    Some(TcpHeaderView {
+        src_port: u16::from_be_bytes([frame[tcp_start], frame[tcp_start + 1]]),
+        dst_port: u16::from_be_bytes([frame[tcp_start + 2], frame[tcp_start + 3]]),
+        seq_num: u32::from_be_bytes([
+            frame[tcp_start + 4],
+            frame[tcp_start + 5],
+            frame[tcp_start + 6],
+            frame[tcp_start + 7],
+        ]),
+        ack_num: u32::from_be_bytes([
+            frame[tcp_start + 8],
+            frame[tcp_start + 9],
+            frame[tcp_start + 10],
+            frame[tcp_start + 11],
+        ]),
+        ack_flag: flags & 0x10 != 0,
+        data_offset_bytes: u8::try_from(data_offset).unwrap_or(255),
+        window: u16::from_be_bytes([frame[tcp_start + 14], frame[tcp_start + 15]]),
+        eth_frame_index,
+        header_range: tcp_start..tcp_start + data_offset,
+    })
 }
