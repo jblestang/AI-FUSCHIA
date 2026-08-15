@@ -75,6 +75,11 @@ fn deliver_tcp_to_l7<D, BC>(
     }
 }
 
+/// EtherTypes consumed at ingress without IP/L7 parsing (normal SPAN noise).
+pub fn ingress_accepts_without_l7(ethertype: EtherType) -> bool {
+    matches!(ethertype, EtherType::Arp)
+}
+
 /// Processes one owned Ethernet frame on the IPS ingress path.
 pub fn process_ethernet_frame<D, BC>(
     state: &IpsState,
@@ -99,6 +104,7 @@ where
     match ethertype {
         Some(EtherType::Ipv4) => process_ipv4(state, bindings_ctx, device_id, frame, ip_offset),
         Some(EtherType::Ipv6) => process_ipv6(state, bindings_ctx, device_id, frame, ip_offset),
+        Some(et) if ingress_accepts_without_l7(et) => Ok(()),
         _ => Err(frame),
     }
 }
@@ -1357,8 +1363,23 @@ mod tests {
     }
 
     #[test]
-    fn non_ip_ethertype_returns_frame_unhandled() {
+    fn arp_ethertype_accepted_without_l7() {
         let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Arp, 0);
+        let frame = Buf::new(vec![0u8; 28], ..)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner();
+        let state = IpsState::new();
+        let mut handler = Capture { views: Vec::new() };
+        process_ethernet_frame(&state, &mut handler, &FakeDeviceId, Buf::new(frame, ..)).unwrap();
+        assert!(handler.views.is_empty());
+    }
+
+    #[test]
+    fn unknown_ethertype_returns_frame_unhandled() {
+        let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::from(0x9999), 0);
         let frame = Buf::new(vec![0u8; 8], ..)
             .wrap_in(eth)
             .serialize_vec_outer(&mut NetworkSerializationContext::default())

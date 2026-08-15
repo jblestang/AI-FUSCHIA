@@ -44,7 +44,7 @@ pub use overwrite::{UdpOverwriteChecksum, UdpOverwriteError, UdpOverwriter};
 pub use ingress_diagnose::{
     diagnose_ingress_rejection, IngressRejectionDiagnosis, IngressRejectionStage,
 };
-pub use receive::process_ethernet_frame;
+pub use receive::{ingress_accepts_without_l7, process_ethernet_frame};
 pub use state::IpsState;
 pub use tcp_flow::{
     InboundSegmentClass, IpsTcpFlowTable, IpsTcpFlowTableConfig, TcpEditRecord, TcpFlowDirection,

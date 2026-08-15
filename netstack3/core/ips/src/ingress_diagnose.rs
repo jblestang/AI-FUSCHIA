@@ -198,6 +198,7 @@ pub fn diagnose_ingress_rejection(frame: &[u8]) -> Option<IngressRejectionDiagno
     match ethertype {
         Some(EtherType::Ipv4) => diagnose_ipv4(frame, ip_offset, &mut diag),
         Some(EtherType::Ipv6) => diagnose_ipv6(frame, ip_offset, &mut diag),
+        Some(et) if crate::receive::ingress_accepts_without_l7(et) => None,
         _ => {
             diag.stage = IngressRejectionStage::UnsupportedEthertype;
             diag.reason = diag.stage.default_reason();
@@ -468,8 +469,20 @@ mod tests {
     }
 
     #[test]
-    fn diagnose_non_ip_ethertype() {
+    fn diagnose_arp_has_no_diagnosis() {
         let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Arp, 0);
+        let frame = Buf::new(vec![0u8; 28], ..)
+            .wrap_in(eth)
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .into_inner();
+        assert!(diagnose_ingress_rejection(&frame).is_none());
+    }
+
+    #[test]
+    fn diagnose_unknown_ethertype() {
+        let eth = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::from(0x9999), 0);
         let frame = Buf::new(vec![0u8; 8], ..)
             .wrap_in(eth)
             .serialize_vec_outer(&mut NetworkSerializationContext::default())
@@ -478,7 +491,7 @@ mod tests {
             .into_inner();
         let diag = diagnose_ingress_rejection(&frame).expect("rejected");
         assert_eq!(diag.stage, IngressRejectionStage::UnsupportedEthertype);
-        assert_eq!(diag.ethertype, Some(u16::from(EtherType::Arp)));
+        assert_eq!(diag.ethertype, Some(0x9999));
     }
 
     #[test]
