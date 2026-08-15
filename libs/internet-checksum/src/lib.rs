@@ -32,9 +32,10 @@
 //    on both x86 and ARM. The functions `adc_uXX` are for this use.
 //
 // 4. AVX2 fast path (x86_64 only): for buffers larger than
-//    [`AVX2_CHECKSUM_THRESHOLD`], load 32 bytes at a time with AVX2 and add
-//    each u64 lane into the u128 scalar accumulator (never accumulating in
-//    SIMD lanes, which would wrap modulo 2^64).
+//    [`AVX2_CHECKSUM_THRESHOLD`], accumulate with AVX2 using 32-bit chunks
+//    zero-extended into 64-bit lanes. The upper 32 bits of each lane defer
+//    carries so many chunks can be summed in parallel before folding into
+//    the u128 scalar accumulator (see BESS `CalculateSum`).
 
 /// Minimum buffer length (exclusive) to use the AVX2 checksum fast path.
 #[cfg(target_arch = "x86_64")]
@@ -274,20 +275,69 @@ fn avx2_available() -> bool {
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn add_u64_chunks_avx2(mut sum: u128, mut bytes: &[u8]) -> (u128, &[u8]) {
-    use core::arch::x86_64::{_mm256_loadu_si256, _mm256_storeu_si256};
+    use core::arch::x86_64::{
+        __m256i, _mm256_add_epi64, _mm256_loadu_si256, _mm256_setzero_si256, _mm256_unpackhi_epi32,
+        _mm256_unpacklo_epi32,
+    };
 
-    while bytes.len() >= 32 {
-        let chunk = unsafe { _mm256_loadu_si256(bytes.as_ptr().cast()) };
-        let mut lanes = [0u64; 4];
-        unsafe { _mm256_storeu_si256(lanes.as_mut_ptr().cast(), chunk) };
-        sum += lanes[0] as u128;
-        sum += lanes[1] as u128;
-        sum += lanes[2] as u128;
-        sum += lanes[3] as u128;
+    let zero = _mm256_setzero_si256();
+    let mut sum_a_lo: __m256i = zero;
+    let mut sum_a_hi: __m256i = zero;
+    let mut sum_b_lo: __m256i = zero;
+    let mut sum_b_hi: __m256i = zero;
+
+    // Dual-stream accumulation minimizes dependency chains (see BESS checksum).
+    if bytes.len() >= 64 {
+        let a = _mm256_loadu_si256(bytes.as_ptr().cast());
+        let b = _mm256_loadu_si256(bytes.as_ptr().add(32).cast());
+        sum_a_lo = _mm256_unpacklo_epi32(a, zero);
+        sum_a_hi = _mm256_unpackhi_epi32(a, zero);
+        sum_b_lo = _mm256_unpacklo_epi32(b, zero);
+        sum_b_hi = _mm256_unpackhi_epi32(b, zero);
+        bytes = &bytes[64..];
+
+        while bytes.len() >= 64 {
+            let a = _mm256_loadu_si256(bytes.as_ptr().cast());
+            let b = _mm256_loadu_si256(bytes.as_ptr().add(32).cast());
+            sum_a_lo = _mm256_add_epi64(sum_a_lo, _mm256_unpacklo_epi32(a, zero));
+            sum_a_hi = _mm256_add_epi64(sum_a_hi, _mm256_unpackhi_epi32(a, zero));
+            sum_b_lo = _mm256_add_epi64(sum_b_lo, _mm256_unpacklo_epi32(b, zero));
+            sum_b_hi = _mm256_add_epi64(sum_b_hi, _mm256_unpackhi_epi32(b, zero));
+            bytes = &bytes[64..];
+        }
+    }
+
+    if bytes.len() >= 32 {
+        let a = _mm256_loadu_si256(bytes.as_ptr().cast());
+        sum_a_lo = _mm256_add_epi64(sum_a_lo, _mm256_unpacklo_epi32(a, zero));
+        sum_a_hi = _mm256_add_epi64(sum_a_hi, _mm256_unpackhi_epi32(a, zero));
         bytes = &bytes[32..];
     }
 
+    let combined = _mm256_add_epi64(
+        _mm256_add_epi64(sum_a_lo, sum_a_hi),
+        _mm256_add_epi64(sum_b_lo, sum_b_hi),
+    );
+    sum = fold_m256i_epi64_to_u128(sum, combined);
+
     (sum, bytes)
+}
+
+/// Folds four u64 lanes from an AVX2 accumulator into a u128 one's-complement
+/// sum. Each lane may already contain deferred 32-bit carries in its upper
+/// half; folding into u128 preserves full precision before final normalization.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn fold_m256i_epi64_to_u128(mut sum: u128, v: core::arch::x86_64::__m256i) -> u128 {
+    use core::arch::x86_64::_mm256_storeu_si256;
+
+    let mut lanes = [0u64; 4];
+    _mm256_storeu_si256(lanes.as_mut_ptr().cast(), v);
+    sum += lanes[0] as u128;
+    sum += lanes[1] as u128;
+    sum += lanes[2] as u128;
+    sum += lanes[3] as u128;
+    sum
 }
 
 /// Normalizes the accumulator by mopping up the
@@ -562,6 +612,7 @@ mod tests {
         }
 
         // Odd lengths exercise trailing-byte handling across the threshold.
+        // Odd lengths exercise trailing-byte handling across the threshold.
         for len in [255, 256, 257, 511, 512, 513] {
             let mut buf = vec![0u8; len];
             rng.fill(&mut buf[..]);
@@ -570,6 +621,15 @@ mod tests {
             c.add_bytes(&buf);
             let avx = c.checksum();
             assert_eq!(avx, scalar, "len={len}");
+        }
+
+        // Uniform bytes stress lane accumulation (would fail if u64 lanes wrapped).
+        for len in [512, 1024, 4096, 9000] {
+            let buf = vec![0xABu8; len];
+            let scalar = checksum_scalar_chunks(&buf);
+            let mut c = Checksum::new();
+            c.add_bytes(&buf);
+            assert_eq!(c.checksum(), scalar, "uniform len={len}");
         }
     }
 
