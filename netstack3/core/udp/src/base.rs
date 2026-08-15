@@ -1525,6 +1525,52 @@ fn record_delivery<
     }
 }
 
+#[derive(GenericOverIp)]
+#[generic_over_ip(I, Ip)]
+struct ConnectedShouldReceiveInput<'a, I: IpExt, D: WeakDeviceIdentifier, BC: UdpBindingsTypes> {
+    conn_state: &'a I::DualStackConnState<D, Udp<BC>>,
+}
+
+/// Returns whether a connected socket should receive on the current IP stack.
+///
+/// When the `single-stack` feature is enabled, other-stack connected state is
+/// ignored and dual-stack context lookup is skipped.
+fn connected_should_receive<
+    I: IpExt,
+    SC: BoundStateContext<I, BC>,
+    BC: UdpBindingsContext<I, SC::DeviceId>,
+>(
+    core_ctx: &mut SC,
+    conn_state: &I::DualStackConnState<SC::WeakDeviceId, Udp<BC>>,
+) -> bool {
+    #[cfg(feature = "single-stack")]
+    {
+        let _ = core_ctx;
+        I::map_ip_in(
+            ConnectedShouldReceiveInput { conn_state },
+            |ConnectedShouldReceiveInput { conn_state }| conn_state.should_receive(),
+            |ConnectedShouldReceiveInput { conn_state }| match conn_state {
+                DualStackConnState::ThisStack(state) => state.should_receive(),
+                DualStackConnState::OtherStack(_) => false,
+            },
+        )
+    }
+    #[cfg(not(feature = "single-stack"))]
+    {
+        match BoundStateContext::dual_stack_context_mut(core_ctx) {
+            MaybeDualStack::DualStack(dual_stack) => {
+                match dual_stack.ds_converter().convert(conn_state) {
+                    DualStackConnState::ThisStack(state) => state.should_receive(),
+                    DualStackConnState::OtherStack(state) => state.should_receive(),
+                }
+            }
+            MaybeDualStack::NotDualStack(not_dual_stack) => {
+                not_dual_stack.nds_converter().convert(conn_state).should_receive()
+            }
+        }
+    }
+}
+
 /// Fast delivery path for sockets resolved by early demux (connected sockets only).
 fn try_deliver_early_demux<
     I: IpExt,
@@ -1549,18 +1595,7 @@ fn try_deliver_early_demux<
         else {
             return None;
         };
-        let should_deliver = match BoundStateContext::dual_stack_context_mut(core_ctx) {
-            MaybeDualStack::DualStack(dual_stack) => {
-                match dual_stack.ds_converter().convert(conn_state) {
-                    DualStackConnState::ThisStack(state) => state.should_receive(),
-                    DualStackConnState::OtherStack(state) => state.should_receive(),
-                }
-            }
-            MaybeDualStack::NotDualStack(not_dual_stack) => {
-                not_dual_stack.nds_converter().convert(conn_state).should_receive()
-            }
-        };
-        if !should_deliver {
+        if !connected_should_receive(core_ctx, conn_state) {
             return None;
         }
         deliver_udp_datagram::<I, WireI, _, _, _>(
@@ -1593,57 +1628,107 @@ fn deliver_early_demux_socket<
     header_info: &H,
     packet: &UdpPacket<&[u8]>,
 ) -> bool {
-    #[derive(GenericOverIp)]
-    #[generic_over_ip(I, Ip)]
-    struct Inputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
-        meta: UdpPacketMeta<I>,
-        socket: I::DualStackBoundSocketId<D, Udp<BT>>,
+    #[cfg(feature = "single-stack")]
+    {
+        #[derive(GenericOverIp)]
+        #[generic_over_ip(I, Ip)]
+        struct Inputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
+            meta: UdpPacketMeta<I>,
+            socket: I::DualStackBoundSocketId<D, Udp<BT>>,
+        }
+
+        struct Outputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
+            meta: UdpPacketMeta<I>,
+            socket: UdpSocketId<I, D, BT>,
+        }
+
+        #[derive(GenericOverIp)]
+        #[generic_over_ip(I, Ip)]
+        enum DualStackOutputs<I: DualStackIpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
+            CurrentStack(Outputs<I, D, BT>),
+            OtherStack(Outputs<I::OtherVersion, D, BT>),
+        }
+
+        let dual_stack_outputs = I::map_ip(
+            Inputs { meta, socket },
+            |Inputs { meta, socket }| match socket {
+                EitherIpSocket::V4(id) => {
+                    DualStackOutputs::CurrentStack(Outputs { meta, socket: id })
+                }
+                EitherIpSocket::V6(id) => {
+                    DualStackOutputs::OtherStack(Outputs { meta: meta.to_ipv6_mapped(), socket: id })
+                }
+            },
+            |Inputs { meta, socket }| DualStackOutputs::CurrentStack(Outputs { meta, socket }),
+        );
+
+        match dual_stack_outputs {
+            DualStackOutputs::CurrentStack(Outputs { meta, socket }) => try_deliver_early_demux(
+                core_ctx,
+                bindings_ctx,
+                &socket,
+                device_id,
+                meta,
+                header_info,
+                packet,
+            ),
+            DualStackOutputs::OtherStack(_) => false,
+        }
     }
+    #[cfg(not(feature = "single-stack"))]
+    {
+        #[derive(GenericOverIp)]
+        #[generic_over_ip(I, Ip)]
+        struct Inputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
+            meta: UdpPacketMeta<I>,
+            socket: I::DualStackBoundSocketId<D, Udp<BT>>,
+        }
 
-    struct Outputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
-        meta: UdpPacketMeta<I>,
-        socket: UdpSocketId<I, D, BT>,
-    }
+        struct Outputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
+            meta: UdpPacketMeta<I>,
+            socket: UdpSocketId<I, D, BT>,
+        }
 
-    #[derive(GenericOverIp)]
-    #[generic_over_ip(I, Ip)]
-    enum DualStackOutputs<I: DualStackIpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
-        CurrentStack(Outputs<I, D, BT>),
-        OtherStack(Outputs<I::OtherVersion, D, BT>),
-    }
+        #[derive(GenericOverIp)]
+        #[generic_over_ip(I, Ip)]
+        enum DualStackOutputs<I: DualStackIpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
+            CurrentStack(Outputs<I, D, BT>),
+            OtherStack(Outputs<I::OtherVersion, D, BT>),
+        }
 
-    let dual_stack_outputs = I::map_ip(
-        Inputs { meta, socket },
-        |Inputs { meta, socket }| match socket {
-            EitherIpSocket::V4(id) => {
-                DualStackOutputs::CurrentStack(Outputs { meta, socket: id })
-            }
-            EitherIpSocket::V6(id) => {
-                DualStackOutputs::OtherStack(Outputs { meta: meta.to_ipv6_mapped(), socket: id })
-            }
-        },
-        |Inputs { meta, socket }| DualStackOutputs::CurrentStack(Outputs { meta, socket }),
-    );
+        let dual_stack_outputs = I::map_ip(
+            Inputs { meta, socket },
+            |Inputs { meta, socket }| match socket {
+                EitherIpSocket::V4(id) => {
+                    DualStackOutputs::CurrentStack(Outputs { meta, socket: id })
+                }
+                EitherIpSocket::V6(id) => {
+                    DualStackOutputs::OtherStack(Outputs { meta: meta.to_ipv6_mapped(), socket: id })
+                }
+            },
+            |Inputs { meta, socket }| DualStackOutputs::CurrentStack(Outputs { meta, socket }),
+        );
 
-    match dual_stack_outputs {
-        DualStackOutputs::CurrentStack(Outputs { meta, socket }) => try_deliver_early_demux(
-            core_ctx,
-            bindings_ctx,
-            &socket,
-            device_id,
-            meta,
-            header_info,
-            packet,
-        ),
-        DualStackOutputs::OtherStack(Outputs { meta, socket }) => try_deliver_early_demux(
-            core_ctx,
-            bindings_ctx,
-            &socket,
-            device_id,
-            meta,
-            header_info,
-            packet,
-        ),
+        match dual_stack_outputs {
+            DualStackOutputs::CurrentStack(Outputs { meta, socket }) => try_deliver_early_demux(
+                core_ctx,
+                bindings_ctx,
+                &socket,
+                device_id,
+                meta,
+                header_info,
+                packet,
+            ),
+            DualStackOutputs::OtherStack(Outputs { meta, socket }) => try_deliver_early_demux(
+                core_ctx,
+                bindings_ctx,
+                &socket,
+                device_id,
+                meta,
+                header_info,
+                packet,
+            ),
+        }
     }
 }
 
@@ -1895,17 +1980,7 @@ fn try_deliver<
                 original_bound_addr: _,
             }) => match socket_type {
                 DatagramBoundSocketStateType::Connected(state) => {
-                    match BoundStateContext::dual_stack_context_mut(core_ctx) {
-                        MaybeDualStack::DualStack(dual_stack) => {
-                            match dual_stack.ds_converter().convert(state) {
-                                DualStackConnState::ThisStack(state) => state.should_receive(),
-                                DualStackConnState::OtherStack(state) => state.should_receive(),
-                            }
-                        }
-                        MaybeDualStack::NotDualStack(not_dual_stack) => {
-                            not_dual_stack.nds_converter().convert(state).should_receive()
-                        }
-                    }
+                    connected_should_receive(core_ctx, state)
                 }
                 DatagramBoundSocketStateType::Listener(_) => true,
             },
@@ -1955,61 +2030,114 @@ fn try_dual_stack_deliver<
     header_info: &H,
     packet: UdpPacket<&[u8]>,
 ) -> bool {
-    #[derive(GenericOverIp)]
-    #[generic_over_ip(I, Ip)]
-    struct Inputs<'a, I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
-        meta: &'a UdpPacketMeta<I>,
-        socket: I::DualStackBoundSocketId<D, Udp<BT>>,
-    }
+    #[cfg(feature = "single-stack")]
+    {
+        #[derive(GenericOverIp)]
+        #[generic_over_ip(I, Ip)]
+        struct Inputs<'a, I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
+            meta: &'a UdpPacketMeta<I>,
+            socket: I::DualStackBoundSocketId<D, Udp<BT>>,
+        }
 
-    struct Outputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
-        meta: UdpPacketMeta<I>,
-        socket: UdpSocketId<I, D, BT>,
-    }
+        struct Outputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
+            meta: UdpPacketMeta<I>,
+            socket: UdpSocketId<I, D, BT>,
+        }
 
-    #[derive(GenericOverIp)]
-    #[generic_over_ip(I, Ip)]
-    enum DualStackOutputs<I: DualStackIpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
-        CurrentStack(Outputs<I, D, BT>),
-        OtherStack(Outputs<I::OtherVersion, D, BT>),
-    }
+        #[derive(GenericOverIp)]
+        #[generic_over_ip(I, Ip)]
+        enum DualStackOutputs<I: DualStackIpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
+            CurrentStack(Outputs<I, D, BT>),
+            OtherStack(Outputs<I::OtherVersion, D, BT>),
+        }
 
-    let dual_stack_outputs = I::map_ip(
-        Inputs { meta, socket },
-        |Inputs { meta, socket }| match socket {
-            EitherIpSocket::V4(socket) => {
+        let dual_stack_outputs = I::map_ip(
+            Inputs { meta, socket },
+            |Inputs { meta, socket }| match socket {
+                EitherIpSocket::V4(socket) => {
+                    DualStackOutputs::CurrentStack(Outputs { meta: meta.clone(), socket })
+                }
+                EitherIpSocket::V6(socket) => {
+                    DualStackOutputs::OtherStack(Outputs { meta: meta.to_ipv6_mapped(), socket })
+                }
+            },
+            |Inputs { meta, socket }| {
                 DualStackOutputs::CurrentStack(Outputs { meta: meta.clone(), socket })
-            }
-            EitherIpSocket::V6(socket) => {
-                DualStackOutputs::OtherStack(Outputs { meta: meta.to_ipv6_mapped(), socket })
-            }
-        },
-        |Inputs { meta, socket }| {
-            DualStackOutputs::CurrentStack(Outputs { meta: meta.clone(), socket })
-        },
-    );
+            },
+        );
 
-    match dual_stack_outputs {
-        DualStackOutputs::CurrentStack(Outputs { meta, socket }) => try_deliver(
-            core_ctx,
-            bindings_ctx,
-            &socket,
-            device_id,
-            meta,
-            require_transparent,
-            header_info,
-            packet,
-        ),
-        DualStackOutputs::OtherStack(Outputs { meta, socket }) => try_deliver(
-            core_ctx,
-            bindings_ctx,
-            &socket,
-            device_id,
-            meta,
-            require_transparent,
-            header_info,
-            packet,
-        ),
+        match dual_stack_outputs {
+            DualStackOutputs::CurrentStack(Outputs { meta, socket }) => try_deliver(
+                core_ctx,
+                bindings_ctx,
+                &socket,
+                device_id,
+                meta,
+                require_transparent,
+                header_info,
+                packet,
+            ),
+            DualStackOutputs::OtherStack(_) => false,
+        }
+    }
+    #[cfg(not(feature = "single-stack"))]
+    {
+        #[derive(GenericOverIp)]
+        #[generic_over_ip(I, Ip)]
+        struct Inputs<'a, I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
+            meta: &'a UdpPacketMeta<I>,
+            socket: I::DualStackBoundSocketId<D, Udp<BT>>,
+        }
+
+        struct Outputs<I: IpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
+            meta: UdpPacketMeta<I>,
+            socket: UdpSocketId<I, D, BT>,
+        }
+
+        #[derive(GenericOverIp)]
+        #[generic_over_ip(I, Ip)]
+        enum DualStackOutputs<I: DualStackIpExt, D: WeakDeviceIdentifier, BT: UdpBindingsTypes> {
+            CurrentStack(Outputs<I, D, BT>),
+            OtherStack(Outputs<I::OtherVersion, D, BT>),
+        }
+
+        let dual_stack_outputs = I::map_ip(
+            Inputs { meta, socket },
+            |Inputs { meta, socket }| match socket {
+                EitherIpSocket::V4(socket) => {
+                    DualStackOutputs::CurrentStack(Outputs { meta: meta.clone(), socket })
+                }
+                EitherIpSocket::V6(socket) => {
+                    DualStackOutputs::OtherStack(Outputs { meta: meta.to_ipv6_mapped(), socket })
+                }
+            },
+            |Inputs { meta, socket }| {
+                DualStackOutputs::CurrentStack(Outputs { meta: meta.clone(), socket })
+            },
+        );
+
+        match dual_stack_outputs {
+            DualStackOutputs::CurrentStack(Outputs { meta, socket }) => try_deliver(
+                core_ctx,
+                bindings_ctx,
+                &socket,
+                device_id,
+                meta,
+                require_transparent,
+                header_info,
+                packet,
+            ),
+            DualStackOutputs::OtherStack(Outputs { meta, socket }) => try_deliver(
+                core_ctx,
+                bindings_ctx,
+                &socket,
+                device_id,
+                meta,
+                require_transparent,
+                header_info,
+                packet,
+            ),
+        }
     }
 }
 

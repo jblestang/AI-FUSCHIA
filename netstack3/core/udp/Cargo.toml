@@ -11,7 +11,9 @@ name = "netstack3_udp"
 testutils = ["instrumented"]
 instrumented = []
 benchmark-harness = []
-benchmark = ["benchmark-harness", "netstack3_base/benchmark-harness", "netstack3_ip/benchmark-harness", "netstack3_filter/benchmark-harness", "netstack3_datagram/benchmark-harness", "dep:criterion"]
+# Skip dual-stack dispatch on the receive hot path (IPv4-only delivery, this-stack only).
+single-stack = []
+benchmark = ["benchmark-harness", "single-stack", "netstack3_base/benchmark-harness", "netstack3_ip/benchmark-harness", "netstack3_filter/benchmark-harness", "netstack3_datagram/benchmark-harness", "dep:criterion"]
 benchmark-instrumented = ["benchmark", "testutils", "instrumented", "netstack3_base/testutils", "netstack3_ip/testutils", "netstack3_filter/testutils", "netstack3_datagram/testutils"]
 
 [dependencies]
