@@ -303,48 +303,118 @@ git commit -am "feat(ips): zero-copy TCP segment ingress with RFC 5722 reassembl
 
 ---
 
-### Task 5: Per-flow TCP sequence/ACK state
+### Task 5: Per-flow TCP stream state (beyond delta)
 
 **Files:**
 - Create: `netstack3/core/ips/src/tcp_flow.rs`
 - Modify: `netstack3/core/ips/src/state.rs`
 - Modify: `netstack3/core/ips/src/lib.rs`
 
-**Problem:** When the L7 agent drops bytes from a segment (incomplete/malicious tail), the on-wire TCP byte stream is shorter than the sender believes. Every subsequent **SEQ** in that direction and every **ACK** in the reverse direction must be adjusted by the cumulative delta — same semantics as inline IPS / TCP NAT sequence mangling.
+**Problem:** A cumulative `delta` alone is **not sufficient** when bytes are in flight. After the IPS drops a tail, the sender still believes those bytes are unacked and will **retransmit** them. The receiver may send **ACKs or SACKs** covering byte ranges the IPS never forwarded. An inline mangler must remember what was actually committed to each peer.
+
+**Why delta alone fails:**
+
+| Scenario | What goes wrong |
+|----------|-----------------|
+| Retransmit of dropped tail | Client resends bytes the IPS discarded → duplicate/wrong data unless suppressed or re-trimmed |
+| ACK ahead of forwarded data | Server ACKs byte 1080 but IPS only forwarded to 1040 → client send window wrong unless ACK clamped |
+| Out-of-order arrival | Segment seq=1100 arrives before seq=1000 is edited → need consistent view of committed stream |
+| SACK options | SACK blocks reference original seq space → must translate or strip blocks in dropped ranges |
+
+**`TcpFlowState` per direction** (store both `c2s` and `s2c` halves inside one flow):
+
+```rust
+pub struct TcpDirectionState {
+    /// Cumulative bytes removed from this direction's stream (header translation).
+    pub delta: u32,
+    /// Exclusive end seq in **sender-original** space: all bytes before this
+    /// that the IPS chose to forward have been committed to the peer.
+    pub committed_end: u32,
+    /// Highest raw seq + payload_len seen from sender (tracks in-flight window).
+    pub sender_hi_water: u32,
+    /// Highest adjusted ack sent toward the sender (prevents over-ACKing dropped bytes).
+    pub ack_toward_sender_cap: Option<u32>,
+}
+
+pub struct TcpFlowState {
+    pub c2s: TcpDirectionState,
+    pub s2c: TcpDirectionState,
+}
+```
+
+**Operations:**
+
+| Operation | When | Effect |
+|-----------|------|--------|
+| `apply_keep_edit(dir, raw_seq, raw_len, keep_len)` | L7 drops tail | Truncate; `removed = raw_len - keep_len`; `delta += removed`; `committed_end = raw_seq + keep_len`; update `sender_hi_water` |
+| `translate_outbound(dir, raw_seq, raw_ack, payload_len)` | Every forwarded segment | `seq' = raw_seq - delta`; `ack' = raw_ack - delta_reverse`; clamp ack toward sender if needed |
+| `classify_inbound(dir, raw_seq, payload_len)` | Segment from sender before edit | `RetransmitDropped` / `RetransmitKeptPrefix` / `NewData` / `OutOfOrderHold` |
+| `adjust_sack_blocks(dir, blocks)` | Segment carries SACK | Shift by `-delta_reverse`; drop blocks in dropped ranges |
 
 **Interfaces:**
 - Produces:
   - `TcpFlowKey { src_ip, src_port, dst_ip, dst_port }`
-  - `TcpFlowDirection` — `ClientToServer` | `ServerToClient` (derived from key orientation)
-  - `TcpFlowState { delta_c2s: u32, delta_s2c: u32 }` — cumulative bytes **removed** from each direction
-  - `IpsTcpFlowTable` — `HashMap<TcpFlowKey, TcpFlowState>` with eviction policy (LRU, default cap 64k flows)
-  - `fn flow_direction(key: &TcpFlowKey, segment: &TcpHeaderView) -> TcpFlowDirection`
-  - `fn adjust_seq_ack(state: &TcpFlowState, dir: TcpFlowDirection, raw_seq: u32, raw_ack: Option<u32>) -> (u32, Option<u32>)`
-  - `fn record_bytes_removed(state: &mut TcpFlowState, dir: TcpFlowDirection, removed: u32)`
+  - `TcpFlowDirection` — `ClientToServer` | `ServerToClient`
+  - `IpsTcpFlowTable` — `HashMap<TcpFlowKey, TcpFlowState>` (LRU, default cap 64k)
+  - `InboundSegmentClass` — classification for retransmit / new / OOO handling
+  - Methods above on `TcpFlowState` and `IpsTcpFlowTable`
 
-**Adjustment rules** (bytes removed from C→S stream; symmetric for S→C):
+**Header translation** (still uses `delta`, but only after classification):
 
-| Field on segment | Direction | Formula |
-|------------------|-----------|---------|
-| SEQ | same as edited segment | `seq' = seq - delta_this_dir` |
-| ACK | same as edited segment | `ack' = ack - delta_reverse_dir` |
-| (pass-through segment) | opposite dir | apply both row above before forward |
-
-After editing payload on C→S: `delta_c2s += (original_payload_len - forwarded_payload_len)`.
+| Field | Direction | Formula |
+|-------|-----------|---------|
+| SEQ | outbound same dir | `seq' = raw_seq - delta` |
+| ACK | outbound same dir | `ack' = min(raw_ack - delta_reverse, ack_toward_sender_cap)` |
+| SACK | outbound | translate block edges by `-delta_reverse`; strip if end ≤ committed_end on acked dir |
 
 - [ ] **Step 1: Write failing tests**
 
 ```rust
 #[test]
-fn seq_and_ack_adjust_after_bytes_removed_from_c2s() {
-    let mut state = TcpFlowState::default();
-    // C→S segment seq=1000, remove 20 payload bytes → delta_c2s=20
-    record_bytes_removed(&mut state, TcpFlowDirection::ClientToServer, 20);
-    // Next C→S segment raw seq=1100 → adjusted 1080
-    assert_eq!(adjust_seq_ack(&state, TcpFlowDirection::ClientToServer, 1100, None).0, 1080);
-    // S→C segment raw ack=1100 → adjusted 1080
-    let (_, ack) = adjust_seq_ack(&state, TcpFlowDirection::ServerToClient, 5000, Some(1100));
-    assert_eq!(ack, Some(1080));
+fn delta_plus_committed_end_after_keep_edit() {
+    let mut flow = TcpFlowState::default();
+    flow.apply_keep_edit(TcpFlowDirection::ClientToServer, 1000, 80, 40);
+    assert_eq!(flow.c2s.delta, 40);
+    assert_eq!(flow.c2s.committed_end, 1040);
+}
+
+#[test]
+fn retransmit_of_dropped_tail_is_classified_suppress() {
+    let mut flow = TcpFlowState::default();
+    flow.apply_keep_edit(TcpFlowDirection::ClientToServer, 1000, 80, 40);
+    // sender retransmits bytes 1040..1080 (the dropped tail)
+    let class = flow.classify_inbound(TcpFlowDirection::ClientToServer, 1040, 40);
+    assert_eq!(class, InboundSegmentClass::RetransmitDropped);
+}
+
+#[test]
+fn retransmit_of_kept_prefix_is_retrimmed_not_suppressed() {
+    let mut flow = TcpFlowState::default();
+    flow.apply_keep_edit(TcpFlowDirection::ClientToServer, 1000, 80, 40);
+    // full segment retransmit seq=1000 len=80 → RetransmitKeptPrefix, apply keep_len=40 again
+    let class = flow.classify_inbound(TcpFlowDirection::ClientToServer, 1000, 80);
+    assert_eq!(class, InboundSegmentClass::RetransmitKeptPrefix);
+}
+
+#[test]
+fn ack_from_peer_clamped_to_committed_end() {
+    let mut flow = TcpFlowState::default();
+    flow.apply_keep_edit(TcpFlowDirection::ClientToServer, 1000, 80, 40);
+    // server acks 1080 (raw); only 1040 was forwarded → ack' toward client = 1040
+    let ack = flow.translate_outbound(
+        TcpFlowDirection::ServerToClient, 5000, Some(1080), 0,
+    ).1;
+    assert_eq!(ack, Some(1040));
+}
+
+#[test]
+fn subsequent_new_data_seq_adjusted_by_delta() {
+    let mut flow = TcpFlowState::default();
+    flow.apply_keep_edit(TcpFlowDirection::ClientToServer, 1000, 80, 40);
+    let (seq, _) = flow.translate_outbound(
+        TcpFlowDirection::ClientToServer, 1080, None, 100,
+    );
+    assert_eq!(seq, 1040);
 }
 ```
 
@@ -352,7 +422,7 @@ fn seq_and_ack_adjust_after_bytes_removed_from_c2s() {
 
 Run: `cargo test -p netstack3-ips tcp_flow -- --nocapture`
 
-- [ ] **Step 3: Implement flow table + adjustment helpers**
+- [ ] **Step 3: Implement flow table + direction state + classification**
 
 Wire `IpsTcpFlowTable` into `IpsState`. Lookup/create flow on each TCP segment delivery.
 
@@ -361,7 +431,7 @@ Wire `IpsTcpFlowTable` into `IpsState`. Lookup/create flow on each TCP segment d
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit -am "feat(ips): add per-flow TCP seq/ack delta tracking"
+git commit -am "feat(ips): per-flow TCP state for in-flight bytes and retransmits"
 ```
 
 ---
@@ -378,6 +448,8 @@ git commit -am "feat(ips): add per-flow TCP seq/ack delta tracking"
   - `TcpPayloadEdit { keep_len: usize }` — keep the first `keep_len` bytes of the reassembled payload unchanged; **drop the tail** (no injection, no middle-range edits)
   - `TcpOverwriteChecksum`, `TcpOverwriteError` (+ `KeepLenExceedsPayload`, `SeqAckOverflow`)
   - `TcpOverwriter<'a, 'flow>` with `flow: &'flow mut TcpFlowState`, `direction: TcpFlowDirection`
+  - `TcpOverwriter::apply_edit` calls `flow.apply_keep_edit(...)` then patches wire headers
+  - `TcpOverwriter::forward_classified` for pass-through / retransmit / suppress paths from `classify_inbound`
 
 **L7 agent contract:**
 
@@ -469,7 +541,14 @@ impl ReceivedTcpSegmentView {
 }
 ```
 
-**Pass-through path:** Add `TcpOverwriter::adjust_headers_only()` for segments the L7 agent forwards unchanged but still need seq/ack mangling because a prior edit on the same flow changed deltas.
+**Pass-through / retransmit paths:**
+
+- `RetransmitDropped` → do not forward (swallow; sender still has bytes in flight until peer ACK catches up)
+- `RetransmitKeptPrefix` → re-apply same `keep_len`, patch headers, forward
+- `NewData` → `translate_outbound` + forward (agent may call `apply_edit` first)
+- `OutOfOrderHold` → v1: hold in small per-flow reorder buffer (cap 32 segments) until `raw_seq == committed_end`, else drop with counter
+
+Remove standalone `adjust_headers_only`; replaced by `forward_classified`.
 
 - [ ] **Step 4: Run tests — expect PASS**
 
@@ -619,8 +698,8 @@ PR title: **IPS zero-copy TCP receive path with TcpOverwriter (parity with PR #1
 | Checksum | UDP + IPv4 header | TCP + IPv4 header (pseudo-header) |
 | Fragment cache key | `(..., IpProto::Udp)` | `(..., IpProto::Tcp)` |
 | Overwriter consolidate | Shrink to 1 frame, clear MF | Same |
-| Stream semantics | Datagram = message | Per-segment + **flow-level seq/ack deltas** |
-| Flow state | None | `IpsTcpFlowTable` per 4-tuple |
+| Stream semantics | Datagram = message | Per-segment edits + **flow state** (delta, committed_end, retransmit class, ACK clamp) |
+| Flow state | None | `IpsTcpFlowTable`: delta + committed byte stream + in-flight handling per direction |
 
 ## Seq/ACK mangling model
 
@@ -643,7 +722,29 @@ sequenceDiagram
     IPS->>S: SEQ=1040, ...
 ```
 
-**Important:** IPS does **not** reassemble TCP byte streams across segments. Each segment is edited independently; the L7 agent decides how much of *this* segment's payload is safe to forward. Flow state only tracks cumulative byte deltas for header mangling on pass-through and subsequent segments.
+**Important:** IPS does **not** reassemble TCP byte streams across segments for L7 parsing. Each segment is edited independently. Flow state tracks what was **committed to the peer** vs what the **sender still has in flight**, so retransmits and ACKs stay consistent.
+
+## Flow state vs delta-only
+
+```mermaid
+flowchart TD
+    subgraph perDirection [Per-direction TcpDirectionState]
+        delta[delta: header translation]
+        committed[committed_end: bytes actually forwarded]
+        hiwater[sender_hi_water: in-flight tracking]
+        ackcap[ack_toward_sender_cap: clamp reverse ACKs]
+    end
+
+    inbound[Inbound segment from sender] --> classify{classify_inbound}
+    classify -->|RetransmitDropped| suppress[Do not forward]
+    classify -->|RetransmitKeptPrefix| retrim[Re-apply keep_len + forward]
+    classify -->|NewData| agent[L7 agent may apply_edit]
+    classify -->|OutOfOrderHold| buffer[Reorder buffer]
+    agent --> apply[apply_keep_edit updates delta + committed_end]
+    apply --> forward[translate_outbound + wire patch]
+    retrim --> forward
+    buffer --> agent
+```
 
 ## Risks and Out-of-Scope
 
@@ -651,8 +752,11 @@ sequenceDiagram
 - **TCP options beyond 20 bytes:** v1 overwrite preserves existing options bytes; does not add/remove options.
 - **IPv6 TCP overwrite:** receive only; overwriter returns `UnsupportedIpVersion`.
 - **SYN/FIN/RST-only segments:** zero-payload segments valid; `apply_edit` with empty keep on payload-only segments; SYN/FIN seq consumption tracked separately from payload delta.
-- **Prefix-only keep:** v1 supports `keep_len` (first N bytes) only — no injection, no dropping a malicious prefix while keeping a suffix. Middle-range edits would require relocating bytes and are out of scope.
-- **Cross-segment incomplete messages:** IPS does not buffer partial app messages across segments — L7 keeps what is valid **within the current segment** only. Multi-segment app reassembly is the agent's responsibility upstream of `apply_edit`.
+- **Out-of-order hold buffer:** v1 caps at 32 segments per flow; overflow → drop + counter (document in ops).
+- **SACK translation:** required when SACK options present; strip blocks acknowledging dropped ranges.
+- **Prefix-only keep:** v1 supports `keep_len` (first N bytes) only — no injection, no dropping a malicious prefix while keeping a suffix.
+- **Cross-segment incomplete messages:** IPS does not buffer partial app messages across segments for L7 parsing — agent keeps valid prefix **within the current segment** only.
+- **Flow table exhaustion:** evict LRU flows; evicted flow → `TcpOverwriteError::UnknownFlow` unless recreated (agent must pass-through unmodified or re-sync).
 - **Simultaneous open / reset:** RST segments use `adjust_headers_only`; RST payload edits rejected.
 
 ## Self-Review
@@ -662,7 +766,7 @@ sequenceDiagram
 | Zero-copy TCP ingress | Task 4 |
 | RFC 5722 fragment policy | Task 4 (reuses existing cache) |
 | Partial keep / drop incomplete tail | Task 6 |
-| Per-flow seq/ack deltas (both directions) | Task 5, Task 8 |
+| Per-flow stream state (in-flight + retransmits) | Task 5, Task 8 |
 | TcpOverwriter wire patch + checksums | Task 6 |
 | NicOffload / ComputeInSoftware | Task 6 |
 | Multi-source fragment test | Task 4 |
