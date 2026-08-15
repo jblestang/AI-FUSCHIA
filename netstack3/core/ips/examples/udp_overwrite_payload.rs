@@ -5,7 +5,8 @@
 //! Example: overwrite UDP payload after L7 deep inspection with [`UdpOverwriter`].
 //!
 //! Receives a UDP datagram, scans the payload, replaces malicious bytes in place,
-//! and refreshes UDP/IPv4 lengths and checksums on the backing frame buffer.
+//! and refreshes UDP/IPv4 length fields on the backing frame buffer. Checksum
+//! fields are zeroed for NIC offload on egress.
 //!
 //! ```text
 //! cargo run -p netstack3-ips --features testutils --example udp_overwrite_payload
@@ -21,10 +22,9 @@ use netstack3_ips::{
     IpsReceiveBindingsContext, IpsReceiveError, IpsState, ReceivedUdpDatagramView,
     process_ethernet_frame,
 };
-use packet::{Buf, NestableSerializer as _, ParsablePacket, Serializer};
+use packet::{Buf, NestableSerializer as _, Serializer};
 use packet_formats::ethernet::{EtherType, ETHERNET_HDR_LEN_NO_TAG, EthernetFrameBuilder};
 use packet_formats::ip::{IpProto, Ipv4Proto};
-use packet_formats::ipv4::Ipv4Packet;
 use packet_formats::udp::UdpPacketBuilder;
 
 const SRC_MAC: Mac = Mac::new([0x02, 0x02, 0x02, 0x02, 0x02, 0x01]);
@@ -60,7 +60,7 @@ impl IpsReceiveBindingsContext<FakeDeviceId> for SanitizingAgent {
 
         view.udp_overwriter()
             .overwrite_payload(&sanitized)
-            .expect("overwrite payload with updated checksums");
+            .expect("overwrite payload with updated lengths");
 
         self.view = Some(view);
         Ok(())
@@ -101,8 +101,24 @@ fn main() {
     assert_eq!(usize::from(udp_len), payload_len + 8);
 
     let frame = view.eth_frames().next().expect("frame");
-    let mut ip_bytes = &frame[ETHERNET_HDR_LEN_NO_TAG..];
-    assert!(Ipv4Packet::parse(&mut ip_bytes, ()).is_ok(), "IPv4 checksum valid after overwrite");
+    let ip_offset = ETHERNET_HDR_LEN_NO_TAG;
+    let udp_hdr = view.udp_header().expect("udp header");
+    assert_eq!(
+        [
+            frame[ip_offset + 10],
+            frame[ip_offset + 11],
+        ],
+        [0, 0],
+        "IPv4 header checksum zeroed for NIC offload"
+    );
+    assert_eq!(
+        [
+            frame[udp_hdr.header_range.start + 6],
+            frame[udp_hdr.header_range.start + 7],
+        ],
+        [0, 0],
+        "UDP checksum zeroed for NIC offload"
+    );
 
-    println!("UDP length field: {udp_len}; IPv4 and UDP checksums updated in place.");
+    println!("UDP length field: {udp_len}; IPv4/UDP checksum fields zeroed for NIC offload.");
 }

@@ -2,13 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! In-place UDP payload overwrite with IPv4/UDP checksum and length updates.
+//! In-place UDP payload overwrite with IPv4/UDP length updates.
+//!
+//! UDP and IPv4 header checksum fields are zeroed for NIC checksum offload on
+//! egress; the stack does not compute them in software.
 
 use alloc::vec::Vec;
 
-use internet_checksum::Checksum;
-use net_types::ip::{IpAddr, Ipv4Addr};
-use packet_formats::ip::IpProto;
 use packet_formats::ipv4::HDR_PREFIX_LEN;
 use packet_formats::udp::HEADER_BYTES;
 
@@ -51,9 +51,9 @@ pub enum UdpOverwriteError {
 
 /// Mutates a delivered [`ReceivedUdpDatagramView`] UDP payload in place.
 ///
-/// After L7 deep inspection, use this to replace payload bytes, refresh the UDP
-/// and IPv4 header length fields, and recompute checksums on the backing frame
-/// buffers.
+/// After L7 deep inspection, use this to replace payload bytes and refresh the
+/// UDP and IPv4 header length fields on the backing frame buffers. Checksum
+/// fields are left zero for hardware offload on transmit.
 pub struct UdpOverwriter<'a> {
     view: &'a mut ReceivedUdpDatagramView,
 }
@@ -70,7 +70,7 @@ impl<'a> UdpOverwriter<'a> {
         Ok(self.current_payload_len())
     }
 
-    /// Replaces the UDP payload, updating UDP/IPv4 lengths and checksums.
+    /// Replaces the UDP payload, updating UDP/IPv4 lengths and zeroing checksums.
     ///
     /// Single-frame datagrams are patched in place (like
     /// [`Self::overwrite_payload_in_place`]) with metadata and buffer truncation
@@ -84,7 +84,7 @@ impl<'a> UdpOverwriter<'a> {
             self.overwrite_single_frame(new_payload)?;
         } else if current == new_payload.len() {
             self.overwrite_payload_parts(new_payload)?;
-            self.refresh_udp_checksum_only(new_payload.len())?;
+            self.refresh_udp_length_only(new_payload.len())?;
         } else if self.is_single_part_unfragmented() {
             self.overwrite_single_frame(new_payload)?;
             self.commit_single_frame_length_change(new_payload.len())?;
@@ -105,7 +105,7 @@ impl<'a> UdpOverwriter<'a> {
             self.overwrite_single_frame(new_payload)?;
         } else {
             self.overwrite_payload_parts(new_payload)?;
-            self.refresh_udp_checksum_only(new_payload.len())?;
+            self.refresh_udp_length_only(new_payload.len())?;
         }
         Ok(())
     }
@@ -171,29 +171,13 @@ impl<'a> UdpOverwriter<'a> {
             buf[payload_start..payload_end].copy_from_slice(new_payload);
         }
 
-        self.patch_unfragmented_lengths_and_checksums(frame_index, ip_start, payload_end)
+        self.patch_unfragmented_lengths(frame_index, ip_start, payload_end)
     }
 
-    fn refresh_udp_checksum_only(&mut self, payload_len: usize) -> Result<(), UdpOverwriteError> {
-        let (src_ip, dst_ip) = ipv4_addrs(self.view)?;
+    fn refresh_udp_length_only(&mut self, payload_len: usize) -> Result<(), UdpOverwriteError> {
         let udp_hdr = self.view.udp_header().expect("validated").clone();
         let udp_len = HEADER_BYTES + payload_len;
         self.view.update_udp_header_view(u16::try_from(udp_len).unwrap_or(u16::MAX));
-
-        let header = self
-            .view
-            .eth_frame_buf(udp_hdr.eth_frame_index)
-            .and_then(|f| f.get(udp_hdr.header_range.clone()))
-            .ok_or(UdpOverwriteError::MissingUdpHeader)?
-            .to_vec();
-
-        let mut header = header;
-        header[UDP_LENGTH_OFFSET..UDP_LENGTH_OFFSET + 2]
-            .copy_from_slice(&u16::try_from(udp_len).unwrap_or(u16::MAX).to_be_bytes());
-        header[UDP_CHECKSUM_OFFSET..UDP_CHECKSUM_OFFSET + 2].copy_from_slice(&[0, 0]);
-
-        let payload_parts: Vec<&[u8]> = self.view.payload_slices().iter().collect();
-        let checksum = compute_udp_checksum_v4_parts(src_ip, dst_ip, &header, payload_parts.iter().copied());
 
         let buf = self
             .view
@@ -202,7 +186,7 @@ impl<'a> UdpOverwriter<'a> {
         buf[udp_hdr.header_range.start + UDP_LENGTH_OFFSET..udp_hdr.header_range.start + UDP_LENGTH_OFFSET + 2]
             .copy_from_slice(&u16::try_from(udp_len).unwrap_or(u16::MAX).to_be_bytes());
         buf[udp_hdr.header_range.start + UDP_CHECKSUM_OFFSET..udp_hdr.header_range.start + UDP_CHECKSUM_OFFSET + 2]
-            .copy_from_slice(&checksum);
+            .copy_from_slice(&[0, 0]);
         Ok(())
     }
 
@@ -246,7 +230,7 @@ impl<'a> UdpOverwriter<'a> {
             buf[payload_start..payload_end].copy_from_slice(new_payload);
         }
 
-        self.patch_unfragmented_lengths_and_checksums(frame_index, ip_offset, payload_end)?;
+        self.patch_unfragmented_lengths(frame_index, ip_offset, payload_end)?;
 
         self.view.truncate_eth_frame(frame_index, payload_end);
         self.view.retain_eth_frames_through(frame_index);
@@ -260,13 +244,12 @@ impl<'a> UdpOverwriter<'a> {
         Ok(())
     }
 
-    fn patch_unfragmented_lengths_and_checksums(
+    fn patch_unfragmented_lengths(
         &mut self,
         frame_index: usize,
         ip_offset: usize,
         payload_end: usize,
     ) -> Result<(), UdpOverwriteError> {
-        let (src_ip, dst_ip) = ipv4_addrs(self.view)?;
         let udp_hdr = self.view.udp_header().expect("validated").clone();
         let ip_body_start = udp_hdr.header_range.start;
         let udp_len = payload_end - ip_body_start;
@@ -282,19 +265,12 @@ impl<'a> UdpOverwriter<'a> {
         buf[ip_offset + IPV4_TOTAL_LEN_OFFSET..ip_offset + IPV4_TOTAL_LEN_OFFSET + 2]
             .copy_from_slice(&u16::try_from(ip_total_len).unwrap_or(u16::MAX).to_be_bytes());
         buf[ip_offset + IPV4_FLAGS_FRAG_OFFSET..ip_offset + IPV4_FLAGS_FRAG_OFFSET + 2].copy_from_slice(&[0, 0]);
-
         buf[udp_hdr.header_range.start + UDP_CHECKSUM_OFFSET..udp_hdr.header_range.start + UDP_CHECKSUM_OFFSET + 2]
             .copy_from_slice(&[0, 0]);
-        let udp_checksum = compute_udp_checksum_v4(src_ip, dst_ip, &buf[ip_body_start..payload_end]);
-        buf[udp_hdr.header_range.start + UDP_CHECKSUM_OFFSET..udp_hdr.header_range.start + UDP_CHECKSUM_OFFSET + 2]
-            .copy_from_slice(&udp_checksum);
 
         if ip_body_start - ip_offset >= HDR_PREFIX_LEN {
             buf[ip_offset + IPV4_HDR_CHECKSUM_OFFSET..ip_offset + IPV4_HDR_CHECKSUM_OFFSET + 2]
                 .copy_from_slice(&[0, 0]);
-            let ip_checksum = compute_ipv4_header_checksum(&buf[ip_offset..ip_offset + HDR_PREFIX_LEN]);
-            buf[ip_offset + IPV4_HDR_CHECKSUM_OFFSET..ip_offset + IPV4_HDR_CHECKSUM_OFFSET + 2]
-                .copy_from_slice(&ip_checksum);
         }
 
         self.view.update_udp_header_view(u16::try_from(udp_len).unwrap_or(u16::MAX));
@@ -309,49 +285,6 @@ impl ReceivedUdpDatagramView {
     }
 }
 
-fn ipv4_addrs(view: &ReceivedUdpDatagramView) -> Result<(Ipv4Addr, Ipv4Addr), UdpOverwriteError> {
-    match view.addrs() {
-        (IpAddr::V4(s), IpAddr::V4(d)) => Ok((s, d)),
-        _ => Err(UdpOverwriteError::UnsupportedIpVersion),
-    }
-}
-
-fn compute_udp_checksum_v4(src: Ipv4Addr, dst: Ipv4Addr, udp_segment: &[u8]) -> [u8; 2] {
-    let mut checksum = Checksum::new();
-    checksum.add_bytes(&src.ipv4_bytes());
-    checksum.add_bytes(&dst.ipv4_bytes());
-    checksum.add_bytes(&[0, IpProto::Udp.into()]);
-    checksum.add_bytes(&(u16::try_from(udp_segment.len()).unwrap_or(u16::MAX)).to_be_bytes());
-    checksum.add_bytes(udp_segment);
-    checksum.checksum()
-}
-
-fn compute_udp_checksum_v4_parts<'a>(
-    src: Ipv4Addr,
-    dst: Ipv4Addr,
-    udp_header: &[u8],
-    payload_parts: impl IntoIterator<Item = &'a [u8]>,
-) -> [u8; 2] {
-    let payload_parts: Vec<&[u8]> = payload_parts.into_iter().collect();
-    let udp_len = udp_header.len() + payload_parts.iter().map(|p| p.len()).sum::<usize>();
-    let mut checksum = Checksum::new();
-    checksum.add_bytes(&src.ipv4_bytes());
-    checksum.add_bytes(&dst.ipv4_bytes());
-    checksum.add_bytes(&[0, IpProto::Udp.into()]);
-    checksum.add_bytes(&(u16::try_from(udp_len).unwrap_or(u16::MAX)).to_be_bytes());
-    checksum.add_bytes(udp_header);
-    for part in payload_parts {
-        checksum.add_bytes(part);
-    }
-    checksum.checksum()
-}
-
-fn compute_ipv4_header_checksum(header_prefix: &[u8]) -> [u8; 2] {
-    let mut checksum = Checksum::new();
-    checksum.add_bytes(header_prefix);
-    checksum.checksum()
-}
-
 #[cfg(test)]
 mod tests {
     use core::num::NonZeroU16;
@@ -360,11 +293,11 @@ mod tests {
     use alloc::vec::Vec;
 
     use net_types::ethernet::Mac;
+    use net_types::ip::Ipv4Addr;
     use netstack3_base::NetworkSerializationContext;
-    use packet::{Buf, NestableSerializer as _, ParsablePacket, Serializer};
+    use packet::{Buf, NestableSerializer as _, Serializer};
     use packet_formats::ethernet::{EtherType, ETHERNET_HDR_LEN_NO_TAG, EthernetFrameBuilder};
-    use packet_formats::ip::Ipv4Proto;
-    use packet_formats::ipv4::Ipv4Packet;
+    use packet_formats::ip::{IpProto, Ipv4Proto};
     use packet_formats::udp::UdpPacketBuilder;
 
     use super::*;
@@ -426,10 +359,39 @@ mod tests {
         )
     }
 
-    fn frame_parseable(frame: &[u8]) -> bool {
+    fn assert_length_fields_and_zero_checksums(
+        frame: &[u8],
+        expected_ip_total: u16,
+        expected_udp_len: u16,
+        udp_header_start: usize,
+    ) {
         let ip_offset = ETHERNET_HDR_LEN_NO_TAG;
-        let mut ip_bytes = &frame[ip_offset..];
-        Ipv4Packet::parse(&mut ip_bytes, ()).is_ok()
+        let ip_total = u16::from_be_bytes([
+            frame[ip_offset + IPV4_TOTAL_LEN_OFFSET],
+            frame[ip_offset + IPV4_TOTAL_LEN_OFFSET + 1],
+        ]);
+        assert_eq!(ip_total, expected_ip_total);
+        assert_eq!(
+            [
+                frame[ip_offset + IPV4_HDR_CHECKSUM_OFFSET],
+                frame[ip_offset + IPV4_HDR_CHECKSUM_OFFSET + 1],
+            ],
+            [0, 0],
+            "IPv4 header checksum left zero for NIC offload"
+        );
+        let udp_len = u16::from_be_bytes([
+            frame[udp_header_start + UDP_LENGTH_OFFSET],
+            frame[udp_header_start + UDP_LENGTH_OFFSET + 1],
+        ]);
+        assert_eq!(udp_len, expected_udp_len);
+        assert_eq!(
+            [
+                frame[udp_header_start + UDP_CHECKSUM_OFFSET],
+                frame[udp_header_start + UDP_CHECKSUM_OFFSET + 1],
+            ],
+            [0, 0],
+            "UDP checksum left zero for NIC offload"
+        );
     }
 
     fn build_ipv4_udp_fragment(
@@ -531,20 +493,18 @@ mod tests {
     }
 
     fn parsed_ipv4_fields(frame: &[u8]) -> (u16, bool, u16) {
-        use packet_formats::ipv4::Ipv4Header;
-
         let ip_offset = ETHERNET_HDR_LEN_NO_TAG;
-        let mut ip_bytes = &frame[ip_offset..];
-        let packet = Ipv4Packet::parse(&mut ip_bytes, ()).expect("parse ipv4");
         let ip_total = u16::from_be_bytes([
             frame[ip_offset + IPV4_TOTAL_LEN_OFFSET],
             frame[ip_offset + IPV4_TOTAL_LEN_OFFSET + 1],
         ]);
-        (
-            ip_total,
-            packet.mf_flag(),
-            packet.fragment_offset().into_raw(),
-        )
+        let flags_frag = u16::from_be_bytes([
+            frame[ip_offset + IPV4_FLAGS_FRAG_OFFSET],
+            frame[ip_offset + IPV4_FLAGS_FRAG_OFFSET + 1],
+        ]);
+        let mf = flags_frag & 0x2000 != 0;
+        let frag_off = flags_frag & 0x1FFF;
+        (ip_total, mf, frag_off)
     }
 
     #[test]
@@ -580,7 +540,8 @@ mod tests {
         assert_eq!(ip_total, EXPECTED_IP_TOTAL, "IPv4 total length must match shrunk datagram");
         assert!(!mf, "IPv4 MF flag must be cleared in the on-wire header");
         assert_eq!(frag_off, 0, "IPv4 fragment offset must be zero");
-        assert!(frame_parseable(frame));
+        let udp_hdr_start = view.udp_header().unwrap().header_range.start;
+        assert_length_fields_and_zero_checksums(frame, EXPECTED_IP_TOTAL, EXPECTED_UDP_LEN, udp_hdr_start);
         assert_eq!(
             frame.len(),
             ETHERNET_HDR_LEN_NO_TAG + usize::from(EXPECTED_IP_TOTAL),
@@ -589,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn overwrite_shrinks_payload_and_updates_checksums() {
+    fn overwrite_shrinks_payload_and_zeros_checksums() {
         let mut view = build_unfragmented_udp(&[0xAA; 64]);
         view.udp_overwriter()
             .overwrite_payload(&[0xBB; 32])
@@ -598,7 +559,8 @@ mod tests {
         assert_eq!(view.payload_slices().iter().map(|s| s.len()).sum::<usize>(), 32);
         assert_eq!(view.udp_header().unwrap().length, 40);
         let frame = view.eth_frames().next().unwrap();
-        assert!(frame_parseable(frame));
+        let udp_hdr_start = view.udp_header().unwrap().header_range.start;
+        assert_length_fields_and_zero_checksums(frame, 60, 40, udp_hdr_start);
         assert_eq!(view.payload_slices().iter().next().unwrap(), &[0xBB; 32]);
 
         let (ip_total, mf, frag_off) = parsed_ipv4_fields(frame);

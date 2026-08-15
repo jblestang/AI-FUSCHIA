@@ -10,7 +10,8 @@
 
 use core::num::NonZeroU16;
 
-use criterion::{BenchmarkGroup, Criterion, Throughput, measurement::WallTime};
+use criterion::{BenchmarkGroup, Criterion, Throughput, black_box, measurement::WallTime};
+use internet_checksum::Checksum;
 use net_types::ethernet::Mac;
 use net_types::ip::Ipv4Addr;
 use netstack3_base::testutil::FakeDeviceId;
@@ -303,6 +304,104 @@ pub fn add_ips_overwrite_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
     register_overwrite_benches(group, ATTACK_PAYLOAD_SIZES, OverwriteMode::ShrinkHalf);
 }
 
+fn deliver_udp_view(template: &[u8]) -> ReceivedUdpDatagramView {
+    struct Capture {
+        view: Option<ReceivedUdpDatagramView>,
+    }
+
+    impl IpsReceiveBindingsContext<FakeDeviceId> for Capture {
+        fn receive_udp_datagram(
+            &mut self,
+            _device_id: &FakeDeviceId,
+            view: ReceivedUdpDatagramView,
+        ) -> Result<(), IpsReceiveError> {
+            self.view = Some(view);
+            Ok(())
+        }
+    }
+
+    let state = IpsState::new();
+    let mut capture = Capture { view: None };
+    process_ethernet_frame(
+        &state,
+        &mut capture,
+        &FakeDeviceId,
+        Buf::new(template.to_vec(), ..),
+    )
+    .expect("deliver view");
+    capture.view.expect("view delivered")
+}
+
+fn bench_udp_ipv4_checksums(payload_len: usize) {
+    let src = LOCAL_IP;
+    let dst = REMOTE_IP;
+    let mut udp_segment = vec![0u8; packet_formats::udp::HEADER_BYTES + payload_len];
+    let udp_len = udp_segment.len();
+    udp_segment[4..6].copy_from_slice(&u16::try_from(udp_len).unwrap_or(u16::MAX).to_be_bytes());
+
+    let mut udp_checksum = Checksum::new();
+    udp_checksum.add_bytes(&src.ipv4_bytes());
+    udp_checksum.add_bytes(&dst.ipv4_bytes());
+    udp_checksum.add_bytes(&[0, IpProto::Udp.into()]);
+    udp_checksum.add_bytes(&udp_segment.len().to_be_bytes()[..2]);
+    udp_checksum.add_bytes(&udp_segment);
+    let udp = udp_checksum.checksum();
+
+    let mut ip_checksum = Checksum::new();
+    ip_checksum.add_bytes(&[0u8; packet_formats::ipv4::HDR_PREFIX_LEN]);
+    let ip = ip_checksum.checksum();
+
+    black_box((udp, ip));
+}
+
+/// Isolated checksum and overwrite-only benchmarks for cost breakdown.
+pub fn add_ips_overwrite_breakdown_benches(group: &mut BenchmarkGroup<'_, WallTime>) {
+    for &payload_len in &[32, 64] {
+        group.bench_function(format!("checksum/udp+ipv4/{payload_len}B-payload"), |bencher| {
+            bencher.iter(|| bench_udp_ipv4_checksums(payload_len));
+        });
+    }
+
+    for &payload_len in &[64] {
+        let frame = build_ethernet_ipv4_udp_frame(payload_len);
+        group.bench_function(format!("deliver-only/{payload_len}B-payload"), |bencher| {
+            bencher.iter(|| deliver_udp_view(&frame.template));
+        });
+    }
+
+    for &(payload_len, mode) in &[(64, OverwriteMode::InPlace), (64, OverwriteMode::ShrinkHalf)] {
+        let frame = build_ethernet_ipv4_udp_frame(payload_len);
+        let replacement_len = match mode {
+            OverwriteMode::InPlace => payload_len,
+            OverwriteMode::ShrinkHalf => payload_len / 2,
+        };
+        let replacement = vec![0xBB; replacement_len];
+        let label = match mode {
+            OverwriteMode::InPlace => "in-place",
+            OverwriteMode::ShrinkHalf => "shrink-half",
+        };
+
+        group.bench_function(
+            format!("overwrite-only/{label}/{payload_len}B->{replacement_len}B"),
+            |bencher| {
+                bencher.iter(|| {
+                    let mut view = deliver_udp_view(&frame.template);
+                    match mode {
+                        OverwriteMode::InPlace => view
+                            .udp_overwriter()
+                            .overwrite_payload_in_place(&replacement)
+                            .expect("in-place"),
+                        OverwriteMode::ShrinkHalf => view
+                            .udp_overwriter()
+                            .overwrite_payload(&replacement)
+                            .expect("shrink"),
+                    }
+                });
+            },
+        );
+    }
+}
+
 /// Hot loop for CPU profiling (perf / samply).
 pub fn profile_hot_loop(payload_len: usize, batches: Option<u64>) {
     let wire_bytes = ethernet_ipv4_udp_wire_bytes(payload_len);
@@ -344,6 +443,13 @@ pub fn add_benches(c: &mut Criterion) {
     overwrite.sample_size(50);
     add_ips_overwrite_benches(&mut overwrite);
     overwrite.finish();
+
+    let mut breakdown = c.benchmark_group("netstack3/ips/overwrite_breakdown");
+    breakdown.warm_up_time(core::time::Duration::from_millis(500));
+    breakdown.measurement_time(core::time::Duration::from_secs(3));
+    breakdown.sample_size(50);
+    add_ips_overwrite_breakdown_benches(&mut breakdown);
+    breakdown.finish();
 }
 
 #[cfg(test)]
