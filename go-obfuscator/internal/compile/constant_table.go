@@ -1,7 +1,6 @@
 package compile
 
 import (
-	"fmt"
 	"go/ast"
 	"go/token"
 
@@ -18,15 +17,10 @@ type constantTable struct {
 }
 
 func newConstantTable(seed, pkgPath string) *constantTable {
-	size := 32
-	slots := make([]int64, size)
-	for i := range slots {
-		slots[i] = hash.Int64(seed, pkgPath, fmt.Sprintf("ctab:init:%d", i))
-	}
 	return &constantTable{
 		seed:    seed,
 		pkgPath: pkgPath,
-		slots:   slots,
+		slots:   nil,
 		sites:   make(map[string]raspFragment),
 	}
 }
@@ -35,12 +29,10 @@ func (t *constantTable) register(ctx string, value int64) raspFragment {
 	if frag, ok := t.sites[ctx]; ok {
 		return frag
 	}
-	idxA := hash.Int(t.seed, t.pkgPath, ctx+":a") % len(t.slots)
-	idxB := hash.Int(t.seed, t.pkgPath, ctx+":b") % len(t.slots)
-	if idxB == idxA {
-		idxB = (idxB + 1) % len(t.slots)
-	}
-	// table[a]^table[b]==value => store table[a]=mask, table[b]=mask^value
+	// Append dedicated slot pairs so later constants cannot overwrite earlier ones.
+	idxA := len(t.slots)
+	idxB := len(t.slots) + 1
+	t.slots = append(t.slots, 0, 0)
 	mask := hash.Int64(t.seed, t.pkgPath, ctx+":mask")
 	t.slots[idxA] = mask
 	t.slots[idxB] = mask ^ value
