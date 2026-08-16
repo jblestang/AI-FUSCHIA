@@ -10,11 +10,13 @@ import (
 	"github.com/ai-fuchsia/go-obfuscator/internal/hash"
 )
 
-const guardDecoyCount = 4 // decoy integrity, antidebug, antiemu, report (+ securityOK helper)
-
-func injectGuardDecoys(cfg Config, pkgPath string, file *ast.File, syms guardSymbols) []ast.Decl {
-	if guardDecoysExist(file, cfg, pkgPath) {
+func injectGuardDecoys(cfg Config, pkgPath string, file *ast.File, syms guardSymbols, batch string) []ast.Decl {
+	if guardDecoysExist(file, cfg, pkgPath, batch) {
 		return nil
+	}
+	prefix := "guard:decoy:"
+	if batch != "" {
+		prefix = "guard:decoy:" + batch + ":"
 	}
 
 	baitStrings := []guardStringEntry{
@@ -33,17 +35,17 @@ func injectGuardDecoys(cfg Config, pkgPath string, file *ast.File, syms guardSym
 	var varDecls strings.Builder
 	decodeCalls := make(map[string]string)
 	for _, entry := range baitStrings {
-		key := hash.Bytes(cfg.Seed, pkgPath, "guard:decoy:skey:"+entry.ctx, 8)
+		key := hash.Bytes(cfg.Seed, pkgPath, prefix+"skey:"+entry.ctx, 8)
 		enc := xorEncode(entry.plain, key)
-		encVar := hash.Name(cfg.Seed, pkgPath, "guard:decoy:enc:"+entry.ctx)
-		keyVar := hash.Name(cfg.Seed, pkgPath, "guard:decoy:k:"+entry.ctx)
+		encVar := hash.Name(cfg.Seed, pkgPath, prefix+"enc:"+entry.ctx)
+		keyVar := hash.Name(cfg.Seed, pkgPath, prefix+"k:"+entry.ctx)
 		fmt.Fprintf(&varDecls, "\t%s = %s\n\t%s = %s\n", encVar, formatByteSlice(enc), keyVar, formatByteSlice(key))
 		decodeCalls[entry.ctx] = fmt.Sprintf("%s(%s, %s)", syms.decrypt, encVar, keyVar)
 	}
 
-	decoyTampered := hash.Name(cfg.Seed, pkgPath, "guard:decoy:tampered")
-	decoyKey := hash.Int64(cfg.Seed, pkgPath, "guard:decoy:key")
-	names := makeDecoyFuncNames(cfg, pkgPath)
+	decoyTampered := hash.Name(cfg.Seed, pkgPath, prefix+"tampered")
+	decoyKey := hash.Int64(cfg.Seed, pkgPath, prefix+"key")
+	names := makeDecoyFuncNames(cfg, pkgPath, batch)
 
 	src := fmt.Sprintf(`package p
 
@@ -106,11 +108,11 @@ func %s() bool {
 }
 `,
 		decoyTampered,
-		hash.Name(cfg.Seed, pkgPath, "guard:decoy:keyvar"), decoyKey,
+		hash.Name(cfg.Seed, pkgPath, prefix+"keyvar"), decoyKey,
 		varDecls.String(),
 		names.integrity,
 		decoyTampered,
-		hash.Name(cfg.Seed, pkgPath, "guard:decoy:keyvar"),
+		hash.Name(cfg.Seed, pkgPath, prefix+"keyvar"),
 		decoyTampered,
 		names.antiDebug,
 		decodeCalls["decoy3-path"],
@@ -151,18 +153,22 @@ type decoyGuardNames struct {
 	securityOK string
 }
 
-func makeDecoyFuncNames(cfg Config, pkgPath string) decoyGuardNames {
+func makeDecoyFuncNames(cfg Config, pkgPath, batch string) decoyGuardNames {
+	prefix := "guard:decoy:"
+	if batch != "" {
+		prefix = "guard:decoy:" + batch + ":"
+	}
 	return decoyGuardNames{
-		integrity:  hash.Name(cfg.Seed, pkgPath, "guard:decoy:integrity"),
-		antiDebug:  hash.Name(cfg.Seed, pkgPath, "guard:decoy:antidebug"),
-		antiEmu:    hash.Name(cfg.Seed, pkgPath, "guard:decoy:antiemu"),
-		report:     hash.Name(cfg.Seed, pkgPath, "guard:decoy:report"),
-		securityOK: hash.Name(cfg.Seed, pkgPath, "guard:decoy:secok"),
+		integrity:  hash.Name(cfg.Seed, pkgPath, prefix+"integrity"),
+		antiDebug:  hash.Name(cfg.Seed, pkgPath, prefix+"antidebug"),
+		antiEmu:    hash.Name(cfg.Seed, pkgPath, prefix+"antiemu"),
+		report:     hash.Name(cfg.Seed, pkgPath, prefix+"report"),
+		securityOK: hash.Name(cfg.Seed, pkgPath, prefix+"secok"),
 	}
 }
 
-func guardDecoysExist(file *ast.File, cfg Config, pkgPath string) bool {
-	name := hash.Name(cfg.Seed, pkgPath, "guard:decoy:integrity")
+func guardDecoysExist(file *ast.File, cfg Config, pkgPath, batch string) bool {
+	name := makeDecoyFuncNames(cfg, pkgPath, batch).integrity
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if ok && fn.Name != nil && fn.Name.Name == name {

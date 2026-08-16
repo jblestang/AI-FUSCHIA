@@ -70,9 +70,9 @@ plain_size="$(stat -c%s "$PLAIN")"
 plain_run_ms="$(bench_runtime_ms "$PLAIN" "$RUN_ITER")"
 plain_per_run_us="$(awk -v ms="$plain_run_ms" -v n="$RUN_ITER" 'BEGIN {printf "%.2f", ms/n*1000}')"
 
-echo "==> obfuscated baseline (-literals -virtualize, seed=$REPRESENTATIVE_SEED)"
+echo "==> obfuscated baseline (-max, seed=$REPRESENTATIVE_SEED)"
 rm -f "$OBF"
-obf_build_ms="$(bench_build_ms obf env GOOVERLAY_MAPFILE="$WORK/map-baseline.json" "$BIN" build -a -literals -virtualize -seed="$REPRESENTATIVE_SEED" -o "$OBF" ./example)"
+obf_build_ms="$(bench_build_ms obf env GOOVERLAY_MAPFILE="$WORK/map-baseline.json" "$BIN" build -a -max -seed="$REPRESENTATIVE_SEED" -o "$OBF" ./example)"
 obf_size="$(stat -c%s "$OBF")"
 obf_run_ms="$(bench_runtime_ms "$OBF" "$RUN_ITER")"
 obf_per_run_us="$(awk -v ms="$obf_run_ms" -v n="$RUN_ITER" 'BEGIN {printf "%.2f", ms/n*1000}')"
@@ -128,7 +128,7 @@ for i in $(seq 0 $((SEED_COUNT - 1))); do
   rm -f "$OBF"
 
   build_start="$(now_ms)"
-  if ! GOOVERLAY_MAPFILE="$mapfile" "$BIN" build -a -literals -virtualize -seed="$seed" -o "$OBF" ./example >/dev/null 2>&1; then
+  if ! GOOVERLAY_MAPFILE="$mapfile" "$BIN" build -a -max -seed="$seed" -o "$OBF" ./example >/dev/null 2>&1; then
     fail=$((fail + 1))
     failures+=("seed=$seed: build failed")
     continue

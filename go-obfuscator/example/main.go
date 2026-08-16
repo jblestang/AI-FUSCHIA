@@ -9,13 +9,11 @@ import (
 )
 
 //gooverlay:file literals
-// Representative license-gated CLI tool: strings, constants, and critical
-// checks are obfuscated when built with gooverlay.
+// License-critical paths use //gooverlay:max (all passes). Build with: gooverlay build -max
 
-const (
-	productVersion  = "2.4.1"
-	minLicenseScore = 100
-)
+const productVersion = "2.4.1"
+
+var minLicenseScore = 100
 
 var defaultTier = "enterprise"
 
@@ -24,6 +22,7 @@ func formatBanner(host string) string {
 	return fmt.Sprintf("%s v%s tier=%s host=%s", title, productVersion, defaultTier, host)
 }
 
+//gooverlay:max
 func scoreLicenseKey(key string) int {
 	normalized := strings.ToUpper(strings.TrimSpace(key))
 	var score int
@@ -35,11 +34,12 @@ func scoreLicenseKey(key string) int {
 	return score
 }
 
+//gooverlay:max
 func licenseSessionID(key string) string {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(key)).String()
 }
 
-//gooverlay:virtualize
+//gooverlay:max
 func applyLicenseBonus(score int) int {
 	return score + 42
 }
@@ -48,10 +48,12 @@ func tierWeight(tier string) int {
 	return len(tier)
 }
 
+//gooverlay:max
 func isLicensed(score int) bool {
 	return score >= minLicenseScore
 }
 
+//gooverlay:max
 func main() {
 	host := os.Args[0]
 	for _, arg := range os.Args[1:] {

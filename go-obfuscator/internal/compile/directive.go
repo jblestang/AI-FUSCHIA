@@ -110,6 +110,8 @@ func applyTokens(o *PassOverride, tokens []string) {
 			o.SkipAll = true
 		case "file":
 			// file-level marker only; tokens after handled separately
+		case "max", "harden", "protect", "license":
+			applyMaxOverride(o)
 		default:
 			setPass(o, tok, true)
 		}

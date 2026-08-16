@@ -55,12 +55,21 @@ func (f *controlFlowFlattener) canFlatten(body *ast.BlockStmt) bool {
 	if body == nil || len(body.List) < 2 {
 		return false
 	}
-	for _, stmt := range body.List {
+	stmts := body.List
+	for _, stmt := range stmts {
 		if !f.isFlatStatement(stmt) {
 			return false
 		}
 	}
-	return true
+	// Reordering must not run return before other statements or use-before-def.
+	if len(stmts) > 1 {
+		for _, stmt := range stmts {
+			if _, ok := stmt.(*ast.ReturnStmt); ok {
+				return false
+			}
+		}
+	}
+	return !hasCrossStatementDeps(stmts)
 }
 
 func (f *controlFlowFlattener) isFlatStatement(stmt ast.Stmt) bool {
@@ -71,6 +80,80 @@ func (f *controlFlowFlattener) isFlatStatement(stmt ast.Stmt) bool {
 	case *ast.AssignStmt, *ast.ExprStmt, *ast.IncDecStmt:
 		return true
 	case *ast.ReturnStmt:
+		return true
+	default:
+		return false
+	}
+}
+
+// hasCrossStatementDeps reports whether any statement uses a variable defined in an earlier one.
+func hasCrossStatementDeps(stmts []ast.Stmt) bool {
+	defined := make(map[string]int)
+	for i, stmt := range stmts {
+		defs := stmtDefs(stmt)
+		for name := range defs {
+			defined[name] = i
+		}
+		for name := range stmtUses(stmt, defs) {
+			if defIdx, ok := defined[name]; ok && defIdx < i {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func stmtDefs(stmt ast.Stmt) map[string]struct{} {
+	out := make(map[string]struct{})
+	switch s := stmt.(type) {
+	case *ast.AssignStmt:
+		for _, lhs := range s.Lhs {
+			if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
+				out[id.Name] = struct{}{}
+			}
+		}
+	case *ast.DeclStmt:
+		gen, ok := s.Decl.(*ast.GenDecl)
+		if !ok {
+			break
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for _, name := range vs.Names {
+				if name.Name != "_" {
+					out[name.Name] = struct{}{}
+				}
+			}
+		}
+	}
+	return out
+}
+
+func stmtUses(stmt ast.Stmt, localDefs map[string]struct{}) map[string]struct{} {
+	out := make(map[string]struct{})
+	ast.Inspect(stmt, func(n ast.Node) bool {
+		id, ok := n.(*ast.Ident)
+		if !ok || id.Name == "_" || isBuiltinIdent(id.Name) {
+			return true
+		}
+		if _, isDef := localDefs[id.Name]; isDef {
+			return true
+		}
+		out[id.Name] = struct{}{}
+		return true
+	})
+	return out
+}
+
+func isBuiltinIdent(name string) bool {
+	switch name {
+	case "true", "false", "nil", "int", "int8", "int16", "int32", "int64",
+		"uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+		"float32", "float64", "complex64", "complex128",
+		"byte", "rune", "string", "bool", "error", "any":
 		return true
 	default:
 		return false

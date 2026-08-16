@@ -90,7 +90,6 @@ func virtualizeFunctions(cfg Config, pkgPath string, file *ast.File, policies *F
 
 	for _, u := range units {
 		u.fn.Body = virtualizedCallBody(cfg, pkgPath, u.fn, u.prog, vmName)
-		policies.MarkSkipDecl(u.fn)
 	}
 }
 

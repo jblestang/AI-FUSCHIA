@@ -27,7 +27,7 @@ func main() {
 	cfg := Config{Seed: "decoy-test", Tamper: true, AntiDebug: true, AntiEmulation: true}
 	injectSecurityGuards(cfg, "example.com/app", file, ParseDirectives(file))
 
-	decoys := makeDecoyFuncNames(cfg, "example.com/app")
+	decoys := makeDecoyFuncNames(cfg, "example.com/app", "")
 	text := formatFileMust(t, fset, file)
 
 	for _, name := range []string{decoys.integrity, decoys.antiDebug, decoys.antiEmu, decoys.report, decoys.securityOK} {

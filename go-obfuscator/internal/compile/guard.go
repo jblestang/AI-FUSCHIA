@@ -30,12 +30,21 @@ func injectSecurityGuards(cfg Config, pkgPath string, file *ast.File, policies *
 		}
 		file.Decls = append(file.Decls[:insertAt], append(decls, file.Decls[insertAt:]...)...)
 	}
-	if decoys := injectGuardDecoys(cfg, pkgPath, file, syms); len(decoys) > 0 {
+	if decoys := injectGuardDecoys(cfg, pkgPath, file, syms, ""); len(decoys) > 0 {
 		insertAt := declInsertAfterImports(file)
 		for _, d := range decoys {
 			policies.MarkSkipDecl(d)
 		}
 		file.Decls = append(file.Decls[:insertAt], append(decoys, file.Decls[insertAt:]...)...)
+	}
+	if cfg.Max {
+		if extra := injectGuardDecoys(cfg, pkgPath, file, syms, "alt"); len(extra) > 0 {
+			insertAt := declInsertAfterImports(file)
+			for _, d := range extra {
+				policies.MarkSkipDecl(d)
+			}
+			file.Decls = append(file.Decls[:insertAt], append(extra, file.Decls[insertAt:]...)...)
+		}
 	}
 
 	for _, decl := range file.Decls {

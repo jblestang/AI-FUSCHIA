@@ -50,7 +50,7 @@ for i in $(seq 0 $((SEED_COUNT - 1))); do
   mapfile="$WORK/map-$i.json"
   rm -f "$OBF"
 
-  if ! GOOVERLAY_MAPFILE="$mapfile" "$BIN" build -a -literals -virtualize -seed="$seed" -o "$OBF" ./example >/dev/null 2>&1; then
+  if ! GOOVERLAY_MAPFILE="$mapfile" "$BIN" build -a -max -seed="$seed" -o "$OBF" ./example >/dev/null 2>&1; then
     fail=$((fail + 1))
     failures+=("seed=$seed: build failed")
     continue

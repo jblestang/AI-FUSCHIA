@@ -77,6 +77,7 @@ Extra flags:
   -tamper / -no-tamper         Automatic tamper identification (default on)
   -antidebug / -no-antidebug   Anti-debug checks (default on)
   -antiemulation / -no-antiemulation  Anti-emulation checks (default on)
+  -max                       Enable all passes (literals, vm, cf, guards, …)
   -a                           Force rebuild all packages
 
 Environment:
@@ -84,6 +85,7 @@ Environment:
   GOOVERLAY_SEED           Obfuscation seed
   GOOVERLAY_MAPFILE        Reversible name map (for reverse/map)
   GOOVERLAY_DEBUGDIR       Obfuscated source output directory
+  GOOVERLAY_MAX            Same as -max (enable all passes)
 `
 }
 
@@ -122,6 +124,7 @@ type buildFlags struct {
 	tamper        bool
 	antiDebug     bool
 	antiEmulation bool
+	max           bool
 	tiny          bool
 	debug         bool
 	debugDir      string
@@ -193,6 +196,8 @@ func parseBuildFlags(args []string) (buildFlags, error) {
 			f.antiEmulation = true
 		case arg == "-no-antiemulation":
 			f.antiEmulation = false
+		case arg == "-max":
+			applyMaxBuildFlags(&f)
 		case strings.HasPrefix(arg, "-seed="):
 			val := strings.TrimPrefix(arg, "-seed=")
 			if val == "random" {
@@ -299,6 +304,7 @@ func runGoCommand(command string, args []string) error {
 		"GOOVERLAY_TAMPER="+boolEnv(flags.tamper),
 		"GOOVERLAY_ANTIDEBUG="+boolEnv(flags.antiDebug),
 		"GOOVERLAY_ANTIEMULATION="+boolEnv(flags.antiEmulation),
+		"GOOVERLAY_MAX="+boolEnv(flags.max),
 		"GOOVERLAY_TINY="+boolEnv(flags.tiny),
 	)
 	return cmd.Run()
@@ -433,4 +439,18 @@ func parseModulePath(modFile string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("module directive not found in %s", modFile)
+}
+
+func applyMaxBuildFlags(f *buildFlags) {
+	f.max = true
+	f.literals = true
+	f.constants = true
+	f.mba = true
+	f.controlFlow = true
+	f.virtualize = true
+	f.junk = true
+	f.opaque = true
+	f.tamper = true
+	f.antiDebug = true
+	f.antiEmulation = true
 }

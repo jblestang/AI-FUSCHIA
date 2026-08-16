@@ -15,10 +15,10 @@ go build -o "$BIN" ./cmd/gooverlay
 echo "==> plain build"
 go build -o "$PLAIN" ./example
 
-echo "==> obfuscated build (Garble-style flags)"
+echo "==> obfuscated build (-max hardening)"
 rm -f "$OBF"
 go clean -cache -testcache 2>/dev/null || true
-GOOVERLAY_MAPFILE="$MAP" "$BIN" build -a -literals -virtualize -seed=test-seed -o "$OBF" ./example
+GOOVERLAY_MAPFILE="$MAP" "$BIN" build -a -max -seed=test-seed -o "$OBF" ./example
 
 echo "==> run obfuscated binary"
 output="$("$OBF" "$OBF")"

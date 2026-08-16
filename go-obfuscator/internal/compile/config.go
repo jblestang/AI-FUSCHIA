@@ -22,6 +22,7 @@ type Config struct {
 	Tamper        bool
 	AntiDebug     bool
 	AntiEmulation bool
+	Max           bool
 	Tiny          bool
 	StripComments bool
 }
@@ -32,7 +33,7 @@ func ConfigFromEnv() Config {
 	if seed == "" {
 		seed = defaultSeed
 	}
-	return Config{
+	cfg := Config{
 		Seed:          seed,
 		MapFile:       os.Getenv("GOOVERLAY_MAPFILE"),
 		DebugDir:      os.Getenv("GOOVERLAY_DEBUGDIR"),
@@ -49,6 +50,10 @@ func ConfigFromEnv() Config {
 		Tiny:          envBool("GOOVERLAY_TINY", false),
 		StripComments: envBool("GOOVERLAY_STRIP_COMMENTS", true),
 	}
+	if envBool("GOOVERLAY_MAX", false) {
+		ApplyMaxDefaults(&cfg)
+	}
+	return cfg
 }
 
 func envBool(key string, defaultVal bool) bool {

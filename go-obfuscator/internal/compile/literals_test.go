@@ -106,10 +106,9 @@ func add(a, b int) int {
 func TestFlattenControlFlow(t *testing.T) {
 	const src = `package main
 
-func work() int {
+func work() {
 	a := 1
 	b := 2
-	return a + b
 }
 `
 	fset := token.NewFileSet()
