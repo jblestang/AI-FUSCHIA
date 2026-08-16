@@ -23,7 +23,7 @@ GOOVERLAY_MAPFILE="$MAP" "$BIN" build -a -literals -virtualize -seed=test-seed -
 echo "==> run obfuscated binary"
 output="$("$OBF" "$OBF")"
 echo "$output"
-for expected in "SecureLicense Demo" "license_score= 768" "licensed= true" "tier_len= 10"; do
+for expected in "SecureLicense Demo" "session_id=" "license_score= 768" "licensed= true" "tier_len= 10"; do
   if ! grep -Fq "$expected" <<< "$output"; then
     echo "missing expected output line: $expected" >&2
     exit 1

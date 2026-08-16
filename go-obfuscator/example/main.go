@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 //gooverlay:file literals
@@ -33,6 +35,10 @@ func scoreLicenseKey(key string) int {
 	return score
 }
 
+func licenseSessionID(key string) string {
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(key)).String()
+}
+
 //gooverlay:virtualize
 func applyLicenseBonus(score int) int {
 	return score + 42
@@ -58,6 +64,7 @@ func main() {
 	finalScore := applyLicenseBonus(rawScore)
 
 	fmt.Println(formatBanner(host))
+	fmt.Println("session_id=", licenseSessionID(licenseKey))
 	fmt.Println("license_score=", finalScore)
 	fmt.Println("licensed=", isLicensed(finalScore))
 	fmt.Println("tier_len=", tierWeight(defaultTier))

@@ -29,7 +29,7 @@ verify_output() {
     failures+=("seed=$seed: exit code $ec")
     return 1
   fi
-  for expected in "SecureLicense Demo" "license_score= 768" "licensed= true" "tier_len= 10"; do
+  for expected in "SecureLicense Demo" "session_id=" "license_score= 768" "licensed= true" "tier_len= 10"; do
     if ! grep -Fq "$expected" <<< "$output"; then
       failures+=("seed=$seed: missing output line: $expected")
       return 1
