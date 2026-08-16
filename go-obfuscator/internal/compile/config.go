@@ -22,7 +22,9 @@ type Config struct {
 	Tamper        bool
 	AntiDebug     bool
 	AntiEmulation bool
+	Multipath     bool
 	Max           bool
+	PathSeed      string
 	Tiny          bool
 	StripComments bool
 }
@@ -47,6 +49,8 @@ func ConfigFromEnv() Config {
 		Tamper:        envBool("GOOVERLAY_TAMPER", true),
 		AntiDebug:     envBool("GOOVERLAY_ANTIDEBUG", true),
 		AntiEmulation: envBool("GOOVERLAY_ANTIEMULATION", true),
+		Multipath:     envBool("GOOVERLAY_MULTIPATH", false),
+		PathSeed:      strings.TrimSpace(os.Getenv("GOOVERLAY_PATH_SEED")),
 		Tiny:          envBool("GOOVERLAY_TINY", false),
 		StripComments: envBool("GOOVERLAY_STRIP_COMMENTS", true),
 	}

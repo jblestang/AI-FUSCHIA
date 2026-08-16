@@ -77,7 +77,9 @@ Extra flags:
   -tamper / -no-tamper         Automatic tamper identification (default on)
   -antidebug / -no-antidebug   Anti-debug checks (default on)
   -antiemulation / -no-antiemulation  Anti-emulation checks (default on)
-  -max                       Enable all passes (literals, vm, cf, guards, …)
+  -max                       Enable all passes (literals, vm, cf, guards, multipath, …)
+  -multipath / -no-multipath Runtime multi-path dispatch (default off; on with -max)
+  -path-seed=KEY             Fixed path selector seed for reproducible multipath tests
   -a                           Force rebuild all packages
 
 Environment:
@@ -86,6 +88,8 @@ Environment:
   GOOVERLAY_MAPFILE        Reversible name map (for reverse/map)
   GOOVERLAY_DEBUGDIR       Obfuscated source output directory
   GOOVERLAY_MAX            Same as -max (enable all passes)
+  GOOVERLAY_MULTIPATH      Runtime multi-path dispatch
+  GOOVERLAY_PATH_SEED      Fixed multipath selector for tests
 `
 }
 
@@ -124,6 +128,8 @@ type buildFlags struct {
 	tamper        bool
 	antiDebug     bool
 	antiEmulation bool
+	multipath     bool
+	pathSeed      string
 	max           bool
 	tiny          bool
 	debug         bool
@@ -143,6 +149,8 @@ func parseBuildFlags(args []string) (buildFlags, error) {
 		tamper:        true,
 		antiDebug:     true,
 		antiEmulation: true,
+		multipath:     envBoolDefault("GOOVERLAY_MULTIPATH", false),
+		pathSeed:      strings.TrimSpace(os.Getenv("GOOVERLAY_PATH_SEED")),
 		seed:          strings.TrimSpace(os.Getenv("GOOVERLAY_SEED")),
 	}
 	if f.seed == "" {
@@ -198,6 +206,12 @@ func parseBuildFlags(args []string) (buildFlags, error) {
 			f.antiEmulation = false
 		case arg == "-max":
 			applyMaxBuildFlags(&f)
+		case arg == "-multipath":
+			f.multipath = true
+		case arg == "-no-multipath":
+			f.multipath = false
+		case strings.HasPrefix(arg, "-path-seed="):
+			f.pathSeed = strings.TrimPrefix(arg, "-path-seed=")
 		case strings.HasPrefix(arg, "-seed="):
 			val := strings.TrimPrefix(arg, "-seed=")
 			if val == "random" {
@@ -304,6 +318,8 @@ func runGoCommand(command string, args []string) error {
 		"GOOVERLAY_TAMPER="+boolEnv(flags.tamper),
 		"GOOVERLAY_ANTIDEBUG="+boolEnv(flags.antiDebug),
 		"GOOVERLAY_ANTIEMULATION="+boolEnv(flags.antiEmulation),
+		"GOOVERLAY_MULTIPATH="+boolEnv(flags.multipath),
+		"GOOVERLAY_PATH_SEED="+flags.pathSeed,
 		"GOOVERLAY_MAX="+boolEnv(flags.max),
 		"GOOVERLAY_TINY="+boolEnv(flags.tiny),
 	)
@@ -383,6 +399,21 @@ func boolEnv(v bool) string {
 		return "1"
 	}
 	return "0"
+}
+
+func envBoolDefault(key string, defaultVal bool) bool {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return defaultVal
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return defaultVal
+	}
 }
 
 func appendEnv(base []string, pairs ...string) []string {

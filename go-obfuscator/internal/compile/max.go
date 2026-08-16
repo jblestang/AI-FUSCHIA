@@ -27,6 +27,7 @@ func applyMaxOverride(o *PassOverride) {
 	o.Tamper = boolPtr(true)
 	o.AntiDebug = boolPtr(true)
 	o.AntiEmulation = boolPtr(true)
+	o.Multipath = boolPtr(true)
 }
 
 func boolPtr(v bool) *bool {

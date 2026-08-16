@@ -91,6 +91,7 @@ func PrepareCompile(cfg Config, importPath string, args []string) ([]string, err
 
 		renamer.collectPackageNames(file)
 		ast.Walk(renamer, file)
+		injectMultipath(cfg, importPath, file, policies)
 		virtualizeFunctions(cfg, importPath, file, policies)
 		obfuscateLiterals(cfg, importPath, fset, file, policies)
 		obfuscateConstants(cfg, importPath, file, policies)

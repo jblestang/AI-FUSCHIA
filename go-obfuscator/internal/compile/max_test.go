@@ -23,7 +23,7 @@ func f() int { return 1 }
 	o := pol.ForFunc(file.Decls[0].(*ast.FuncDecl))
 	for _, pass := range []PassName{
 		PassLiterals, PassConstants, PassMBA, PassControlFlow, PassVirtualize,
-		PassJunk, PassOpaque, PassTamper, PassAntiDebug, PassAntiEmulation,
+		PassJunk, PassOpaque, PassTamper, PassAntiDebug, PassAntiEmulation, PassMultipath,
 	} {
 		if !PassEnabled(cfg, o, pass) {
 			t.Fatalf("max directive should enable pass %q", pass)
@@ -35,6 +35,9 @@ func TestApplyMaxDefaults(t *testing.T) {
 	cfg := Config{Seed: "x"}
 	ApplyMaxDefaults(&cfg)
 	if !cfg.Max || !cfg.Literals || !cfg.Virtualize || !cfg.ControlFlow || !cfg.Tamper {
-		t.Fatalf("ApplyMaxDefaults should enable all passes: %+v", cfg)
+		t.Fatalf("ApplyMaxDefaults should enable core passes: %+v", cfg)
+	}
+	if cfg.Multipath {
+		t.Fatal("ApplyMaxDefaults should not enable global multipath; use //gooverlay:max per function")
 	}
 }

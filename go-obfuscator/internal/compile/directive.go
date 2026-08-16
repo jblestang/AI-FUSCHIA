@@ -21,6 +21,7 @@ const (
 	PassTamper        PassName = "tamper"
 	PassAntiDebug     PassName = "antidebug"
 	PassAntiEmulation PassName = "antiemulation"
+	PassMultipath     PassName = "multipath"
 )
 
 // PassOverride is nil = inherit global/defaults, true/false = force.
@@ -36,6 +37,7 @@ type PassOverride struct {
 	Tamper        *bool
 	AntiDebug     *bool
 	AntiEmulation *bool
+	Multipath     *bool
 }
 
 // FilePolicies holds parsed //gooverlay: directives from AST comments.
@@ -145,6 +147,9 @@ func setPass(o *PassOverride, name string, on bool) {
 	case PassAntiEmulation, "anti-emulation", "emulation":
 		onE := on
 		o.AntiEmulation = &onE
+	case PassMultipath, "multi-path":
+		onM := on
+		o.Multipath = &onM
 	}
 }
 
@@ -163,6 +168,7 @@ func mergeOverride(base, extra PassOverride) PassOverride {
 	out.Tamper = coalesceBool(out.Tamper, extra.Tamper)
 	out.AntiDebug = coalesceBool(out.AntiDebug, extra.AntiDebug)
 	out.AntiEmulation = coalesceBool(out.AntiEmulation, extra.AntiEmulation)
+	out.Multipath = coalesceBool(out.Multipath, extra.Multipath)
 	return out
 }
 
@@ -210,6 +216,8 @@ func PassEnabled(cfg Config, o PassOverride, pass PassName) bool {
 		return pick(o.AntiDebug, cfg.AntiDebug)
 	case PassAntiEmulation:
 		return pick(o.AntiEmulation, cfg.AntiEmulation)
+	case PassMultipath:
+		return pick(o.Multipath, cfg.Multipath)
 	default:
 		return false
 	}
