@@ -32,7 +32,7 @@ func main() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, needle := range []string{
+	for _, forbidden := range []string{
 		"__gooverlay_integrity",
 		"__gooverlay_antidebug",
 		"__gooverlay_antiemulation",
@@ -41,12 +41,16 @@ func main() {
 		"/proc/self/status",
 		"/proc/cpuinfo",
 		"qemu_fw_cfg",
+		"QEMU_ENV",
 	} {
-		if !strings.Contains(text, needle) {
-			t.Fatalf("expected security runtime %q in:\n%s", needle, text)
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("cleartext security marker %q should be hidden:\n%s", forbidden, text)
 		}
 	}
-	if !strings.Contains(text, "if !__gooverlay_integrity") && !strings.Contains(text, "__gooverlay_integrity(") {
-		t.Fatalf("expected tamper check in function body:\n%s", text)
+	if !strings.Contains(text, "func o") {
+		t.Fatalf("expected hashed guard symbols in:\n%s", text)
+	}
+	if !strings.Contains(text, "os.Exit") {
+		t.Fatalf("expected inlined guard exit in function body:\n%s", text)
 	}
 }

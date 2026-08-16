@@ -73,8 +73,8 @@ func mix(n int) int {
 	if strings.Contains(text, "+ 42") || strings.Contains(text, "return 42") {
 		t.Fatalf("expected integer literal to be obfuscated, got:\n%s", text)
 	}
-	if !strings.Contains(text, "__gooverlay_rasp") && !strings.Contains(text, "__gooverlay_ctab") {
-		t.Fatalf("expected indexed constant table / RASP, got:\n%s", text)
+	if !strings.Contains(text, "[]int64{") || strings.Contains(text, "__gooverlay_rasp") {
+		t.Fatalf("expected seed-hashed RASP constant table, got:\n%s", text)
 	}
 }
 

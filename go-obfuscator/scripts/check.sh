@@ -30,14 +30,18 @@ for expected in "SecureLicense Demo" "session_id=" "license_score= 768" "license
   fi
 done
 
-echo "==> verify tamper, anti-debug & anti-emulation runtime injected"
-for needle in "__gooverlay_integrity" "__gooverlay_antidebug" "__gooverlay_antiemulation" "__gooverlay_report_tamper"; do
-  if ! grep -aFq "$needle" "$OBF"; then
-    echo "obfuscated binary missing security symbol: $needle" >&2
+echo "==> verify security runtime hides cleartext markers"
+for forbidden in "__gooverlay_integrity" "__gooverlay_antidebug" "__gooverlay_antiemulation" "__gooverlay_report_tamper" "TracerPid:" "/proc/self/status" "QEMU_ENV" "UNDER_QEMU"; do
+  if grep -aFq "$forbidden" "$OBF"; then
+    echo "obfuscated binary exposes cleartext security marker: $forbidden" >&2
     exit 1
   fi
 done
-echo "obfuscated binary includes tamper identification, anti-debug, and anti-emulation runtime"
+if ! grep -aFq "main.main" "$OBF"; then
+  echo "obfuscated binary missing main.main" >&2
+  exit 1
+fi
+echo "obfuscated binary hides security marker strings"
 
 echo "==> verify obfuscated strings are hidden"
 for needle in "SecureLicense Demo" "enterprise" "2.4.1" "DEMO-ENT-2026"; do

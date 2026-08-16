@@ -5,18 +5,9 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"strings"
 
 	"github.com/ai-fuchsia/go-obfuscator/internal/hash"
-)
-
-const (
-	guardIntegrityBase     = "__gooverlay_integrity"
-	guardAntiDebugBase     = "__gooverlay_antidebug"
-	guardAntiEmulationBase = "__gooverlay_antiemulation"
-	guardReportBase        = "__gooverlay_report_tamper"
-	guardSecurityOKBase    = "__gooverlay_security_ok"
-	guardTamperedVar       = "__gooverlay_tampered"
-	guardKeyVar            = "__gooverlay_guard_key"
 )
 
 func injectSecurityGuards(cfg Config, pkgPath string, file *ast.File, policies *FilePolicies) {
@@ -30,8 +21,9 @@ func injectSecurityGuards(cfg Config, pkgPath string, file *ast.File, policies *
 		return
 	}
 
+	syms := guardSymbolsFor(cfg, pkgPath)
 	guardKey := hash.Int64(cfg.Seed, pkgPath, "guard:key")
-	if decls := injectGuardRuntime(file, guardKey); len(decls) > 0 {
+	if decls := injectGuardRuntime(cfg, pkgPath, file, syms, guardKey); len(decls) > 0 {
 		insertAt := declInsertAfterImports(file)
 		for _, d := range decls {
 			policies.MarkSkipDecl(d)
@@ -57,13 +49,13 @@ func injectSecurityGuards(cfg Config, pkgPath string, file *ast.File, policies *
 
 		prefix := make([]ast.Stmt, 0, 3)
 		if tamperOn && PassEnabled(cfg, pol, PassTamper) {
-			prefix = append(prefix, tamperCheckStmt(cfg, pkgPath, fn.Name.Name, guardKey))
+			prefix = append(prefix, tamperCheckStmt(cfg, pkgPath, fn.Name.Name, guardKey, syms))
 		}
 		if antiDebugOn && PassEnabled(cfg, pol, PassAntiDebug) {
-			prefix = append(prefix, antiDebugCheckStmt())
+			prefix = append(prefix, antiDebugCheckStmt(syms, 98))
 		}
 		if antiEmulationOn && PassEnabled(cfg, pol, PassAntiEmulation) {
-			prefix = append(prefix, antiEmulationCheckStmt())
+			prefix = append(prefix, antiEmulationCheckStmt(syms, 97))
 		}
 		if len(prefix) == 0 {
 			continue
@@ -72,7 +64,7 @@ func injectSecurityGuards(cfg Config, pkgPath string, file *ast.File, policies *
 	}
 }
 
-func tamperCheckStmt(cfg Config, pkgPath, funcName string, guardKey int64) ast.Stmt {
+func tamperCheckStmt(cfg Config, pkgPath, funcName string, guardKey int64, syms guardSymbols) ast.Stmt {
 	tag := hash.Int(cfg.Seed, pkgPath, "guard:tag:"+funcName) % 1000000
 	expected := int((int64(tag)*31 + guardKey) % 997)
 	exitCode := hash.Int(cfg.Seed, pkgPath, "guard:exit:"+funcName)%89 + 10
@@ -81,50 +73,101 @@ func tamperCheckStmt(cfg Config, pkgPath, funcName string, guardKey int64) ast.S
 		Cond: &ast.UnaryExpr{
 			Op: token.NOT,
 			X: &ast.CallExpr{
-				Fun: ast.NewIdent(guardIntegrityBase),
+				Fun: ast.NewIdent(syms.integrity),
 				Args: []ast.Expr{
 					intLit(int64(tag)),
 					intLit(int64(expected)),
 				},
 			},
 		},
-		Body: &ast.BlockStmt{List: []ast.Stmt{
-			&ast.ExprStmt{X: &ast.CallExpr{
-				Fun:  ast.NewIdent(guardReportBase),
-				Args: []ast.Expr{intLit(int64(exitCode))},
-			}},
-		}},
+		Body: &ast.BlockStmt{List: guardFailStmts(syms, exitCode)},
 	}
 }
 
-func antiDebugCheckStmt() ast.Stmt {
+func antiDebugCheckStmt(syms guardSymbols, code int) ast.Stmt {
 	return &ast.IfStmt{
-		Cond: &ast.CallExpr{Fun: ast.NewIdent(guardAntiDebugBase)},
-		Body: &ast.BlockStmt{List: []ast.Stmt{
-			&ast.ExprStmt{X: &ast.CallExpr{
-				Fun:  ast.NewIdent(guardReportBase),
-				Args: []ast.Expr{intLit(98)},
-			}},
-		}},
+		Cond: &ast.CallExpr{Fun: ast.NewIdent(syms.antiDebug)},
+		Body: &ast.BlockStmt{List: guardFailStmts(syms, code)},
 	}
 }
 
-func antiEmulationCheckStmt() ast.Stmt {
+func antiEmulationCheckStmt(syms guardSymbols, code int) ast.Stmt {
 	return &ast.IfStmt{
-		Cond: &ast.CallExpr{Fun: ast.NewIdent(guardAntiEmulationBase)},
-		Body: &ast.BlockStmt{List: []ast.Stmt{
-			&ast.ExprStmt{X: &ast.CallExpr{
-				Fun:  ast.NewIdent(guardReportBase),
-				Args: []ast.Expr{intLit(97)},
-			}},
+		Cond: &ast.CallExpr{Fun: ast.NewIdent(syms.antiEmulation)},
+		Body: &ast.BlockStmt{List: guardFailStmts(syms, code)},
+	}
+}
+
+func guardFailStmts(syms guardSymbols, code int) []ast.Stmt {
+	return []ast.Stmt{
+		&ast.AssignStmt{
+			Lhs: []ast.Expr{ast.NewIdent(syms.tampered)},
+			Tok: token.ASSIGN,
+			Rhs: []ast.Expr{&ast.Ident{Name: "true"}},
+		},
+		&ast.ExprStmt{X: &ast.CallExpr{
+			Fun: &ast.SelectorExpr{
+				X:   ast.NewIdent("os"),
+				Sel: ast.NewIdent("Exit"),
+			},
+			Args: []ast.Expr{intLit(int64(code))},
 		}},
 	}
 }
 
-func injectGuardRuntime(file *ast.File, guardKey int64) []ast.Decl {
-	if guardRuntimeExists(file) {
+type guardStringEntry struct {
+	ctx   string
+	plain string
+}
+
+func injectGuardRuntime(cfg Config, pkgPath string, file *ast.File, syms guardSymbols, guardKey int64) []ast.Decl {
+	if guardRuntimeExists(file, syms.integrity) {
 		return nil
 	}
+
+	stringsToHide := []guardStringEntry{
+		{ctx: "goos", plain: "linux"},
+		{ctx: "proc-status", plain: "/proc/self/status"},
+		{ctx: "tracer", plain: "TracerPid:"},
+		{ctx: "nl", plain: "\n"},
+		{ctx: "proc-cpu", plain: "/proc/cpuinfo"},
+		{ctx: "needle-qemu", plain: "qemu virtual"},
+		{ctx: "needle-kvm", plain: "common kvm processor"},
+		{ctx: "needle-vcpu", plain: "virtual cpu"},
+		{ctx: "needle-uemu", plain: "user-mode emulation"},
+		{ctx: "needle-bochs", plain: "bochs"},
+		{ctx: "needle-vbox", plain: "vbox"},
+		{ctx: "needle-vmware", plain: "vmware virtual platform"},
+		{ctx: "needle-tcg", plain: "tcg guest"},
+		{ctx: "dmi-product", plain: "/sys/class/dmi/id/product_name"},
+		{ctx: "dmi-vendor", plain: "/sys/class/dmi/id/sys_vendor"},
+		{ctx: "dmi-board", plain: "/sys/class/dmi/id/board_vendor"},
+		{ctx: "dmi-qemu", plain: "qemu"},
+		{ctx: "dmi-bochs", plain: "bochs"},
+		{ctx: "dmi-vbox", plain: "virtualbox"},
+		{ctx: "dmi-vbox2", plain: "vbox"},
+		{ctx: "dmi-vmware", plain: "vmware"},
+		{ctx: "dmi-indie", plain: "independent virtual"},
+		{ctx: "dev-qemu", plain: "/dev/qemu_pipe"},
+		{ctx: "dev-gold", plain: "/dev/goldfish_pipe"},
+		{ctx: "dev-wsock", plain: "/dev/wsocket"},
+		{ctx: "dev-fw", plain: "/sys/firmware/qemu_fw_cfg"},
+		{ctx: "env-qemu", plain: "QEMU_ENV"},
+		{ctx: "env-under", plain: "UNDER_QEMU"},
+		{ctx: "env-unicorn", plain: "UNICORN_ENGINE"},
+	}
+
+	var varDecls strings.Builder
+	decodeCalls := make(map[string]string)
+	for _, entry := range stringsToHide {
+		key := hash.Bytes(cfg.Seed, pkgPath, "guard:skey:"+entry.ctx, 8)
+		enc := xorEncode(entry.plain, key)
+		encVar := hash.Name(cfg.Seed, pkgPath, "guard:enc:"+entry.ctx)
+		keyVar := hash.Name(cfg.Seed, pkgPath, "guard:k:"+entry.ctx)
+		fmt.Fprintf(&varDecls, "\t%s = %s\n\t%s = %s\n", encVar, formatByteSlice(enc), keyVar, formatByteSlice(key))
+		decodeCalls[entry.ctx] = fmt.Sprintf("%s(%s, %s)", syms.decrypt, encVar, keyVar)
+	}
+
 	src := fmt.Sprintf(`package p
 
 import (
@@ -135,6 +178,17 @@ import (
 
 var %s bool
 var %s int64 = %d
+
+var (
+%s)
+
+func %s(enc, key []byte) string {
+	out := make([]byte, len(enc))
+	for i := range enc {
+		out[i] = enc[i] ^ key[i%%len(key)]
+	}
+	return string(out)
+}
 
 func %s(tag, expected int) bool {
 	if %s {
@@ -148,16 +202,16 @@ func %s(tag, expected int) bool {
 	return ok
 }
 
-func __gooverlay_tracerAttached() bool {
-	if runtime.GOOS != "linux" {
+func %s() bool {
+	if runtime.GOOS != %s {
 		return false
 	}
-	data, err := os.ReadFile("/proc/self/status")
+	data, err := os.ReadFile(%s)
 	if err != nil {
 		return false
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "TracerPid:") {
+	for _, line := range strings.Split(string(data), %s) {
+		if strings.HasPrefix(line, %s) {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 && fields[1] != "0" {
 				return true
@@ -167,30 +221,21 @@ func __gooverlay_tracerAttached() bool {
 	return false
 }
 
-func __gooverlay_parentSuspicious() bool {
+func %s() bool {
 	ppid := os.Getppid()
 	return ppid > 1 && ppid != os.Getpid()
 }
 
-func __gooverlay_emulatorCPUInfo() bool {
-	if runtime.GOOS != "linux" {
+func %s() bool {
+	if runtime.GOOS != %s {
 		return false
 	}
-	data, err := os.ReadFile("/proc/cpuinfo")
+	data, err := os.ReadFile(%s)
 	if err != nil {
 		return false
 	}
 	lower := strings.ToLower(string(data))
-	for _, needle := range []string{
-		"qemu virtual",
-		"common kvm processor",
-		"virtual cpu",
-		"user-mode emulation",
-		"bochs",
-		"vbox",
-		"vmware virtual platform",
-		"tcg guest",
-	} {
+	for _, needle := range []string{%s, %s, %s, %s, %s, %s, %s, %s} {
 		if strings.Contains(lower, needle) {
 			return true
 		}
@@ -198,21 +243,17 @@ func __gooverlay_emulatorCPUInfo() bool {
 	return false
 }
 
-func __gooverlay_emulatorDMI() bool {
-	if runtime.GOOS != "linux" {
+func %s() bool {
+	if runtime.GOOS != %s {
 		return false
 	}
-	for _, path := range []string{
-		"/sys/class/dmi/id/product_name",
-		"/sys/class/dmi/id/sys_vendor",
-		"/sys/class/dmi/id/board_vendor",
-	} {
+	for _, path := range []string{%s, %s, %s} {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
 		lower := strings.ToLower(string(data))
-		for _, needle := range []string{"qemu", "bochs", "virtualbox", "vbox", "vmware", "independent virtual"} {
+		for _, needle := range []string{%s, %s, %s, %s, %s, %s} {
 			if strings.Contains(lower, needle) {
 				return true
 			}
@@ -221,13 +262,8 @@ func __gooverlay_emulatorDMI() bool {
 	return false
 }
 
-func __gooverlay_emulatorDevices() bool {
-	for _, path := range []string{
-		"/dev/qemu_pipe",
-		"/dev/goldfish_pipe",
-		"/dev/wsocket",
-		"/sys/firmware/qemu_fw_cfg",
-	} {
+func %s() bool {
+	for _, path := range []string{%s, %s, %s, %s} {
 		if _, err := os.Stat(path); err == nil {
 			return true
 		}
@@ -235,8 +271,8 @@ func __gooverlay_emulatorDevices() bool {
 	return false
 }
 
-func __gooverlay_emulatorEnv() bool {
-	for _, key := range []string{"QEMU_ENV", "UNDER_QEMU", "UNICORN_ENGINE"} {
+func %s() bool {
+	for _, key := range []string{%s, %s, %s} {
 		if os.Getenv(key) != "" {
 			return true
 		}
@@ -245,50 +281,65 @@ func __gooverlay_emulatorEnv() bool {
 }
 
 func %s() bool {
-	if __gooverlay_tracerAttached() {
+	if %s() {
 		return true
 	}
-	_ = __gooverlay_parentSuspicious()
+	_ = %s()
 	return false
 }
 
 func %s() bool {
-	if __gooverlay_emulatorCPUInfo() {
+	if %s() {
 		return true
 	}
-	if __gooverlay_emulatorDMI() {
+	if %s() {
 		return true
 	}
-	if __gooverlay_emulatorDevices() {
+	if %s() {
 		return true
 	}
-	return __gooverlay_emulatorEnv()
-}
-
-func %s(code int) {
-	%s = true
-	os.Exit(code)
-}
-
-func %s() bool {
-	return !%s && !%s() && !%s()
+	return %s()
 }
 `,
-		guardTamperedVar,
-		guardKeyVar, guardKey,
-		guardIntegrityBase,
-		guardTamperedVar,
-		guardKeyVar,
-		guardTamperedVar,
-		guardAntiDebugBase,
-		guardAntiEmulationBase,
-		guardReportBase,
-		guardTamperedVar,
-		guardSecurityOKBase,
-		guardTamperedVar,
-		guardAntiDebugBase,
-		guardAntiEmulationBase,
+		syms.tampered,
+		syms.guardKey, guardKey,
+		varDecls.String(),
+		syms.decrypt,
+		syms.integrity,
+		syms.tampered,
+		syms.guardKey,
+		syms.tampered,
+		syms.tracer,
+		decodeCalls["goos"],
+		decodeCalls["proc-status"],
+		decodeCalls["nl"],
+		decodeCalls["tracer"],
+		syms.parentSusp,
+		syms.emuCPU,
+		decodeCalls["goos"],
+		decodeCalls["proc-cpu"],
+		decodeCalls["needle-qemu"], decodeCalls["needle-kvm"], decodeCalls["needle-vcpu"],
+		decodeCalls["needle-uemu"], decodeCalls["needle-bochs"], decodeCalls["needle-vbox"],
+		decodeCalls["needle-vmware"], decodeCalls["needle-tcg"],
+		syms.emuDMI,
+		decodeCalls["goos"],
+		decodeCalls["dmi-product"], decodeCalls["dmi-vendor"], decodeCalls["dmi-board"],
+		decodeCalls["dmi-qemu"], decodeCalls["dmi-bochs"], decodeCalls["dmi-vbox"],
+		decodeCalls["dmi-vbox2"], decodeCalls["dmi-vmware"], decodeCalls["dmi-indie"],
+		syms.emuDev,
+		decodeCalls["dev-qemu"], decodeCalls["dev-gold"], decodeCalls["dev-wsock"], decodeCalls["dev-fw"],
+		syms.emuEnv,
+		decodeCalls["env-qemu"], decodeCalls["env-under"], decodeCalls["env-unicorn"],
+		syms.antiDebug,
+		syms.tracer,
+		syms.parentSusp,
+		syms.antiEmulation,
+		syms.emuCPU,
+		syms.emuDMI,
+		syms.emuDev,
+		syms.emuEnv,
 	)
+
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "guard.go", src, 0)
 	if err != nil {
@@ -365,10 +416,10 @@ func importPaths(file *ast.File) map[string]bool {
 	return out
 }
 
-func guardRuntimeExists(file *ast.File) bool {
+func guardRuntimeExists(file *ast.File, integrityName string) bool {
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if ok && fn.Name != nil && fn.Name.Name == guardIntegrityBase {
+		if ok && fn.Name != nil && fn.Name.Name == integrityName {
 			return true
 		}
 	}

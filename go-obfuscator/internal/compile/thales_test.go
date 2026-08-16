@@ -31,11 +31,11 @@ func f() int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(text, "__gooverlay_ctab") {
+	if !strings.Contains(text, "[]int64{") {
 		t.Fatalf("expected indexed constant table, got:\n%s", text)
 	}
-	if !strings.Contains(text, "__gooverlay_rasp") {
-		t.Fatalf("expected RASP agent, got:\n%s", text)
+	if strings.Contains(text, "__gooverlay_rasp") {
+		t.Fatalf("RASP agent name should be seed-hashed, got:\n%s", text)
 	}
 	if !strings.Contains(text, "*") || !strings.Contains(text, "==") {
 		t.Fatalf("expected MBA multiplication opaque predicate, got:\n%s", text)

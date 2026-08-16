@@ -113,9 +113,9 @@ verify_output() {
       return 1
     fi
   done
-  for needle in "__gooverlay_integrity" "__gooverlay_antidebug" "__gooverlay_antiemulation"; do
-    if ! grep -aFq "$needle" "$OBF"; then
-      failures+=("seed=$seed: missing security symbol: $needle")
+  for forbidden in "__gooverlay_integrity" "__gooverlay_antidebug" "__gooverlay_antiemulation" "TracerPid:" "QEMU_ENV"; do
+    if grep -aFq "$forbidden" "$OBF"; then
+      failures+=("seed=$seed: exposes cleartext marker: $forbidden")
       return 1
     fi
   done
