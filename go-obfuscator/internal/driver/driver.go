@@ -76,6 +76,7 @@ Extra flags:
   -opaque / -no-opaque         Opaque predicates (default on)
   -tamper / -no-tamper         Automatic tamper identification (default on)
   -antidebug / -no-antidebug   Anti-debug checks (default on)
+  -antiemulation / -no-antiemulation  Anti-emulation checks (default on)
   -a                           Force rebuild all packages
 
 Environment:
@@ -120,6 +121,7 @@ type buildFlags struct {
 	opaque        bool
 	tamper        bool
 	antiDebug     bool
+	antiEmulation bool
 	tiny          bool
 	debug         bool
 	debugDir      string
@@ -135,9 +137,10 @@ func parseBuildFlags(args []string) (buildFlags, error) {
 		mba:         true,
 		junk:        true,
 		opaque:      true,
-		tamper:      true,
-		antiDebug:   true,
-		seed:        strings.TrimSpace(os.Getenv("GOOVERLAY_SEED")),
+		tamper:        true,
+		antiDebug:     true,
+		antiEmulation: true,
+		seed:          strings.TrimSpace(os.Getenv("GOOVERLAY_SEED")),
 	}
 	if f.seed == "" {
 		f.seed = defaultSeed
@@ -186,6 +189,10 @@ func parseBuildFlags(args []string) (buildFlags, error) {
 			f.antiDebug = true
 		case arg == "-no-antidebug":
 			f.antiDebug = false
+		case arg == "-antiemulation":
+			f.antiEmulation = true
+		case arg == "-no-antiemulation":
+			f.antiEmulation = false
 		case strings.HasPrefix(arg, "-seed="):
 			val := strings.TrimPrefix(arg, "-seed=")
 			if val == "random" {
@@ -291,6 +298,7 @@ func runGoCommand(command string, args []string) error {
 		"GOOVERLAY_OPAQUE="+boolEnv(flags.opaque),
 		"GOOVERLAY_TAMPER="+boolEnv(flags.tamper),
 		"GOOVERLAY_ANTIDEBUG="+boolEnv(flags.antiDebug),
+		"GOOVERLAY_ANTIEMULATION="+boolEnv(flags.antiEmulation),
 		"GOOVERLAY_TINY="+boolEnv(flags.tiny),
 	)
 	return cmd.Run()

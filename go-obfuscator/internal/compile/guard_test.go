@@ -25,7 +25,7 @@ func main() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := compile.Config{Seed: "guard-test", Tamper: true, AntiDebug: true, Junk: false, Opaque: false}
+	cfg := compile.Config{Seed: "guard-test", Tamper: true, AntiDebug: true, AntiEmulation: true, Junk: false, Opaque: false}
 	compile.InjectSecurityGuardsInFile(cfg, "example.com/app", file)
 
 	text, err := formatFile(fset, file)
@@ -35,9 +35,12 @@ func main() {
 	for _, needle := range []string{
 		"__gooverlay_integrity",
 		"__gooverlay_antidebug",
+		"__gooverlay_antiemulation",
 		"__gooverlay_report_tamper",
 		"TracerPid:",
 		"/proc/self/status",
+		"/proc/cpuinfo",
+		"qemu_fw_cfg",
 	} {
 		if !strings.Contains(text, needle) {
 			t.Fatalf("expected security runtime %q in:\n%s", needle, text)

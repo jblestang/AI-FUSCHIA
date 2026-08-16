@@ -10,12 +10,13 @@ import (
 )
 
 const (
-	guardIntegrityBase   = "__gooverlay_integrity"
-	guardAntiDebugBase   = "__gooverlay_antidebug"
-	guardReportBase      = "__gooverlay_report_tamper"
-	guardSecurityOKBase  = "__gooverlay_security_ok"
-	guardTamperedVar     = "__gooverlay_tampered"
-	guardKeyVar          = "__gooverlay_guard_key"
+	guardIntegrityBase     = "__gooverlay_integrity"
+	guardAntiDebugBase     = "__gooverlay_antidebug"
+	guardAntiEmulationBase = "__gooverlay_antiemulation"
+	guardReportBase        = "__gooverlay_report_tamper"
+	guardSecurityOKBase    = "__gooverlay_security_ok"
+	guardTamperedVar       = "__gooverlay_tampered"
+	guardKeyVar            = "__gooverlay_guard_key"
 )
 
 func injectSecurityGuards(cfg Config, pkgPath string, file *ast.File, policies *FilePolicies) {
@@ -24,7 +25,8 @@ func injectSecurityGuards(cfg Config, pkgPath string, file *ast.File, policies *
 	}
 	tamperOn := anyPassEnabled(cfg, policies, file, PassTamper)
 	antiDebugOn := anyPassEnabled(cfg, policies, file, PassAntiDebug)
-	if !tamperOn && !antiDebugOn {
+	antiEmulationOn := anyPassEnabled(cfg, policies, file, PassAntiEmulation)
+	if !tamperOn && !antiDebugOn && !antiEmulationOn {
 		return
 	}
 
@@ -53,12 +55,15 @@ func injectSecurityGuards(cfg Config, pkgPath string, file *ast.File, policies *
 			continue
 		}
 
-		prefix := make([]ast.Stmt, 0, 2)
+		prefix := make([]ast.Stmt, 0, 3)
 		if tamperOn && PassEnabled(cfg, pol, PassTamper) {
 			prefix = append(prefix, tamperCheckStmt(cfg, pkgPath, fn.Name.Name, guardKey))
 		}
 		if antiDebugOn && PassEnabled(cfg, pol, PassAntiDebug) {
 			prefix = append(prefix, antiDebugCheckStmt())
+		}
+		if antiEmulationOn && PassEnabled(cfg, pol, PassAntiEmulation) {
+			prefix = append(prefix, antiEmulationCheckStmt())
 		}
 		if len(prefix) == 0 {
 			continue
@@ -99,6 +104,18 @@ func antiDebugCheckStmt() ast.Stmt {
 			&ast.ExprStmt{X: &ast.CallExpr{
 				Fun:  ast.NewIdent(guardReportBase),
 				Args: []ast.Expr{intLit(98)},
+			}},
+		}},
+	}
+}
+
+func antiEmulationCheckStmt() ast.Stmt {
+	return &ast.IfStmt{
+		Cond: &ast.CallExpr{Fun: ast.NewIdent(guardAntiEmulationBase)},
+		Body: &ast.BlockStmt{List: []ast.Stmt{
+			&ast.ExprStmt{X: &ast.CallExpr{
+				Fun:  ast.NewIdent(guardReportBase),
+				Args: []ast.Expr{intLit(97)},
 			}},
 		}},
 	}
@@ -155,6 +172,78 @@ func __gooverlay_parentSuspicious() bool {
 	return ppid > 1 && ppid != os.Getpid()
 }
 
+func __gooverlay_emulatorCPUInfo() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	data, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return false
+	}
+	lower := strings.ToLower(string(data))
+	for _, needle := range []string{
+		"qemu virtual",
+		"common kvm processor",
+		"virtual cpu",
+		"user-mode emulation",
+		"bochs",
+		"vbox",
+		"vmware virtual platform",
+		"tcg guest",
+	} {
+		if strings.Contains(lower, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func __gooverlay_emulatorDMI() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	for _, path := range []string{
+		"/sys/class/dmi/id/product_name",
+		"/sys/class/dmi/id/sys_vendor",
+		"/sys/class/dmi/id/board_vendor",
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		lower := strings.ToLower(string(data))
+		for _, needle := range []string{"qemu", "bochs", "virtualbox", "vbox", "vmware", "independent virtual"} {
+			if strings.Contains(lower, needle) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func __gooverlay_emulatorDevices() bool {
+	for _, path := range []string{
+		"/dev/qemu_pipe",
+		"/dev/goldfish_pipe",
+		"/dev/wsocket",
+		"/sys/firmware/qemu_fw_cfg",
+	} {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func __gooverlay_emulatorEnv() bool {
+	for _, key := range []string{"QEMU_ENV", "UNDER_QEMU", "UNICORN_ENGINE"} {
+		if os.Getenv(key) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func %s() bool {
 	if __gooverlay_tracerAttached() {
 		return true
@@ -163,13 +252,26 @@ func %s() bool {
 	return false
 }
 
+func %s() bool {
+	if __gooverlay_emulatorCPUInfo() {
+		return true
+	}
+	if __gooverlay_emulatorDMI() {
+		return true
+	}
+	if __gooverlay_emulatorDevices() {
+		return true
+	}
+	return __gooverlay_emulatorEnv()
+}
+
 func %s(code int) {
 	%s = true
 	os.Exit(code)
 }
 
 func %s() bool {
-	return !%s && !%s()
+	return !%s && !%s() && !%s()
 }
 `,
 		guardTamperedVar,
@@ -179,11 +281,13 @@ func %s() bool {
 		guardKeyVar,
 		guardTamperedVar,
 		guardAntiDebugBase,
+		guardAntiEmulationBase,
 		guardReportBase,
 		guardTamperedVar,
 		guardSecurityOKBase,
 		guardTamperedVar,
 		guardAntiDebugBase,
+		guardAntiEmulationBase,
 	)
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "guard.go", src, 0)

@@ -30,14 +30,14 @@ for expected in "SecureLicense Demo" "license_score= 768" "licensed= true" "tier
   fi
 done
 
-echo "==> verify tamper & anti-debug runtime injected"
-for needle in "__gooverlay_integrity" "__gooverlay_antidebug" "__gooverlay_report_tamper"; do
+echo "==> verify tamper, anti-debug & anti-emulation runtime injected"
+for needle in "__gooverlay_integrity" "__gooverlay_antidebug" "__gooverlay_antiemulation" "__gooverlay_report_tamper"; do
   if ! grep -aFq "$needle" "$OBF"; then
     echo "obfuscated binary missing security symbol: $needle" >&2
     exit 1
   fi
 done
-echo "obfuscated binary includes tamper identification and anti-debug runtime"
+echo "obfuscated binary includes tamper identification, anti-debug, and anti-emulation runtime"
 
 echo "==> verify obfuscated strings are hidden"
 for needle in "SecureLicense Demo" "enterprise" "2.4.1" "DEMO-ENT-2026"; do

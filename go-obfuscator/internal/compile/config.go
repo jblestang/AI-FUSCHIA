@@ -21,6 +21,7 @@ type Config struct {
 	Opaque        bool
 	Tamper        bool
 	AntiDebug     bool
+	AntiEmulation bool
 	Tiny          bool
 	StripComments bool
 }
@@ -44,6 +45,7 @@ func ConfigFromEnv() Config {
 		Opaque:        envBool("GOOVERLAY_OPAQUE", true),
 		Tamper:        envBool("GOOVERLAY_TAMPER", true),
 		AntiDebug:     envBool("GOOVERLAY_ANTIDEBUG", true),
+		AntiEmulation: envBool("GOOVERLAY_ANTIEMULATION", true),
 		Tiny:          envBool("GOOVERLAY_TINY", false),
 		StripComments: envBool("GOOVERLAY_STRIP_COMMENTS", true),
 	}
