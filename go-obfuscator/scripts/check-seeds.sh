@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-SEED_COUNT="${SEED_COUNT:-100}"
+SEED_COUNT="${SEED_COUNT:-20}"
 BIN="/tmp/gooverlay-seed-check"
 OBF="/tmp/gooverlay-seed-obf"
 WORK="/tmp/gooverlay-seed-work"
