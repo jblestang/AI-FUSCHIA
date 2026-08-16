@@ -23,17 +23,15 @@ GOOVERLAY_MAPFILE="$MAP" "$BIN" build -a -literals -virtualize -seed=test-seed -
 echo "==> run obfuscated binary"
 output="$("$OBF" "$OBF")"
 echo "$output"
-case "$output" in
-  *"gooverlay sample"*) ;;
-  *"salted= 46"*) ;;
-  *)
-    echo "unexpected obfuscated binary output" >&2
+for expected in "SecureLicense Demo" "license_score= 768" "licensed= true" "tier_len= 10"; do
+  if ! grep -Fq "$expected" <<< "$output"; then
+    echo "missing expected output line: $expected" >&2
     exit 1
-    ;;
-esac
+  fi
+done
 
 echo "==> verify obfuscated strings are hidden"
-for needle in "gooverlay sample" "demo" "0.1.0"; do
+for needle in "SecureLicense Demo" "enterprise" "2.4.1" "DEMO-ENT-2026"; do
   if strings "$OBF" | grep -Fq "$needle"; then
     echo "obfuscated binary still contains plain string: $needle" >&2
     exit 1
@@ -49,8 +47,8 @@ fi
 echo "obfuscated binary hides integer constants"
 
 echo "==> compare symbols"
-plain_hits="$(strings "$PLAIN" | grep -E 'main\.(formatBanner|countVisibleChars|buildTag)' || true)"
-obf_hits="$(strings "$OBF" | grep -E 'main\.(formatBanner|countVisibleChars|buildTag)' || true)"
+plain_hits="$(strings "$PLAIN" | grep -E 'main\.(formatBanner|scoreLicenseKey|applyLicenseBonus)' || true)"
+obf_hits="$(strings "$OBF" | grep -E 'main\.(formatBanner|scoreLicenseKey|applyLicenseBonus)' || true)"
 
 if [[ -z "$plain_hits" ]]; then
   echo "plain binary missing expected symbols" >&2
@@ -76,9 +74,9 @@ if ! grep -Fq formatBanner "$MAP"; then
 fi
 echo "map file records obfuscation mappings"
 
-echo "==> verify virtualization (applySalt not plain in source logic)"
-if strings "$OBF" | grep -Fq 'applySalt'; then
-  echo "note: applySalt symbol may remain in DWARF-free binary depending on toolchain"
+echo "==> verify virtualization (applyLicenseBonus not plain in source logic)"
+if strings "$OBF" | grep -Fq 'applyLicenseBonus'; then
+  echo "note: applyLicenseBonus symbol may remain in DWARF-free binary depending on toolchain"
 fi
 echo "virtualization enabled for eligible functions"
 

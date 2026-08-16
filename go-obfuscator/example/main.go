@@ -3,44 +3,62 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
-// Sample application for gooverlay. Private identifiers, string literals, and
-// eligible function bodies are transformed at compile time when using gooverlay build.
+//gooverlay:file literals
+// Representative license-gated CLI tool: strings, constants, and critical
+// checks are obfuscated when built with gooverlay.
 
-const appVersion = "0.1.0"
+const (
+	productVersion  = "2.4.1"
+	minLicenseScore = 100
+)
 
-const checksumSalt = 42
+var defaultTier = "enterprise"
 
-var buildTag = "demo"
-
-func formatBanner(name string) string {
-	label := "gooverlay sample"
-	return fmt.Sprintf("%s v%s [%s] running as %s", label, appVersion, buildTag, name)
+func formatBanner(host string) string {
+	title := "SecureLicense Demo"
+	return fmt.Sprintf("%s v%s tier=%s host=%s", title, productVersion, defaultTier, host)
 }
 
-func countVisibleChars(text string) int {
-	total := 0
-	for _, r := range text {
-		if r != ' ' {
-			total++
+func scoreLicenseKey(key string) int {
+	normalized := strings.ToUpper(strings.TrimSpace(key))
+	var score int
+	for _, r := range normalized {
+		if r != '-' {
+			score += int(r)
 		}
 	}
-	return total
+	return score
 }
 
 //gooverlay:virtualize
-func applySalt(n int) int {
-	return n + checksumSalt
+func applyLicenseBonus(score int) int {
+	return score + 42
+}
+
+func tierWeight(tier string) int {
+	return len(tier)
+}
+
+func isLicensed(score int) bool {
+	return score >= minLicenseScore
 }
 
 func main() {
-	target := "unknown"
-	if len(os.Args) > 0 {
-		target = os.Args[0]
+	host := os.Args[0]
+	for _, arg := range os.Args[1:] {
+		host = arg
+		break
 	}
 
-	fmt.Println(formatBanner(target))
-	fmt.Println("visible_chars=", countVisibleChars(buildTag))
-	fmt.Println("salted=", applySalt(len(buildTag)))
+	licenseKey := "DEMO-ENT-2026"
+	rawScore := scoreLicenseKey(licenseKey)
+	finalScore := applyLicenseBonus(rawScore)
+
+	fmt.Println(formatBanner(host))
+	fmt.Println("license_score=", finalScore)
+	fmt.Println("licensed=", isLicensed(finalScore))
+	fmt.Println("tier_len=", tierWeight(defaultTier))
 }

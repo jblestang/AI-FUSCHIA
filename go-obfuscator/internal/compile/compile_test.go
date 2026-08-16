@@ -75,7 +75,7 @@ func TestPrepareCompileExamplePipeline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), `"gooverlay sample"`) {
+	if strings.Contains(string(data), `"SecureLicense Demo"`) {
 		t.Fatalf("expected obfuscated literals")
 	}
 }
