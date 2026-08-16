@@ -74,6 +74,8 @@ Extra flags:
   -virtualize / -no-virtualize     Code virtualization via bytecode VM (default off)
   -junk / -no-junk             Dead code injection (default on)
   -opaque / -no-opaque         Opaque predicates (default on)
+  -tamper / -no-tamper         Automatic tamper identification (default on)
+  -antidebug / -no-antidebug   Anti-debug checks (default on)
   -a                           Force rebuild all packages
 
 Environment:
@@ -116,6 +118,8 @@ type buildFlags struct {
 	virtualize    bool
 	junk          bool
 	opaque        bool
+	tamper        bool
+	antiDebug     bool
 	tiny          bool
 	debug         bool
 	debugDir      string
@@ -131,6 +135,8 @@ func parseBuildFlags(args []string) (buildFlags, error) {
 		mba:         true,
 		junk:        true,
 		opaque:      true,
+		tamper:      true,
+		antiDebug:   true,
 		seed:        strings.TrimSpace(os.Getenv("GOOVERLAY_SEED")),
 	}
 	if f.seed == "" {
@@ -172,6 +178,14 @@ func parseBuildFlags(args []string) (buildFlags, error) {
 			f.opaque = true
 		case arg == "-no-opaque":
 			f.opaque = false
+		case arg == "-tamper":
+			f.tamper = true
+		case arg == "-no-tamper":
+			f.tamper = false
+		case arg == "-antidebug":
+			f.antiDebug = true
+		case arg == "-no-antidebug":
+			f.antiDebug = false
 		case strings.HasPrefix(arg, "-seed="):
 			val := strings.TrimPrefix(arg, "-seed=")
 			if val == "random" {
@@ -275,6 +289,8 @@ func runGoCommand(command string, args []string) error {
 		"GOOVERLAY_VIRTUALIZE="+boolEnv(flags.virtualize),
 		"GOOVERLAY_JUNK="+boolEnv(flags.junk),
 		"GOOVERLAY_OPAQUE="+boolEnv(flags.opaque),
+		"GOOVERLAY_TAMPER="+boolEnv(flags.tamper),
+		"GOOVERLAY_ANTIDEBUG="+boolEnv(flags.antiDebug),
 		"GOOVERLAY_TINY="+boolEnv(flags.tiny),
 	)
 	return cmd.Run()

@@ -98,6 +98,7 @@ func PrepareCompile(cfg Config, importPath string, args []string) ([]string, err
 		injectJunk(cfg, importPath, file, policies)
 		injectOpaquePredicates(cfg, importPath, file, policies)
 		flattenControlFlow(cfg, importPath, file, policies)
+		injectSecurityGuards(cfg, importPath, file, policies)
 
 		out, err := formatFile(fset, file)
 		if err != nil {

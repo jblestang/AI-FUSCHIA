@@ -8,7 +8,7 @@ import (
 	"github.com/ai-fuchsia/go-obfuscator/internal/mapfile"
 )
 
-const overlayPipelineVersion = "thales-v1"
+const overlayPipelineVersion = "guard-v2"
 
 func obfuscatedFilePath(cfg Config, importPath, srcPath string) (string, error) {
 	base := filepath.Base(srcPath)

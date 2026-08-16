@@ -17,9 +17,11 @@ type Config struct {
 	MBA         bool
 	ControlFlow bool
 	Virtualize  bool
-	Junk        bool
-	Opaque      bool
-	Tiny        bool
+	Junk          bool
+	Opaque        bool
+	Tamper        bool
+	AntiDebug     bool
+	Tiny          bool
 	StripComments bool
 }
 
@@ -40,6 +42,8 @@ func ConfigFromEnv() Config {
 		Virtualize:    envBool("GOOVERLAY_VIRTUALIZE", false),
 		Junk:          envBool("GOOVERLAY_JUNK", true),
 		Opaque:        envBool("GOOVERLAY_OPAQUE", true),
+		Tamper:        envBool("GOOVERLAY_TAMPER", true),
+		AntiDebug:     envBool("GOOVERLAY_ANTIDEBUG", true),
 		Tiny:          envBool("GOOVERLAY_TINY", false),
 		StripComments: envBool("GOOVERLAY_STRIP_COMMENTS", true),
 	}

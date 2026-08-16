@@ -2,7 +2,7 @@ package compile
 
 import "go/ast"
 
-// InjectOpaqueInFile applies opaque predicate injection for tests.
-func InjectOpaqueInFile(cfg Config, pkgPath string, file *ast.File) {
-	injectOpaquePredicates(cfg, pkgPath, file, ParseDirectives(file))
+// InjectSecurityGuardsInFile applies tamper and anti-debug injection for tests.
+func InjectSecurityGuardsInFile(cfg Config, pkgPath string, file *ast.File) {
+	injectSecurityGuards(cfg, pkgPath, file, ParseDirectives(file))
 }

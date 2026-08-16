@@ -18,6 +18,8 @@ const (
 	PassVirtualize  PassName = "virtualize"
 	PassJunk        PassName = "junk"
 	PassOpaque      PassName = "opaque"
+	PassTamper      PassName = "tamper"
+	PassAntiDebug   PassName = "antidebug"
 )
 
 // PassOverride is nil = inherit global/defaults, true/false = force.
@@ -30,6 +32,8 @@ type PassOverride struct {
 	Virtualize *bool
 	Junk       *bool
 	Opaque     *bool
+	Tamper     *bool
+	AntiDebug  *bool
 }
 
 // FilePolicies holds parsed //gooverlay: directives from AST comments.
@@ -128,6 +132,12 @@ func setPass(o *PassOverride, name string, on bool) {
 		o.Junk = &on
 	case PassOpaque:
 		o.Opaque = &on
+	case PassTamper, "integrity":
+		onT := on
+		o.Tamper = &onT
+	case PassAntiDebug, "anti-debug":
+		onA := on
+		o.AntiDebug = &onA
 	}
 }
 
@@ -143,6 +153,8 @@ func mergeOverride(base, extra PassOverride) PassOverride {
 	out.Virtualize = coalesceBool(out.Virtualize, extra.Virtualize)
 	out.Junk = coalesceBool(out.Junk, extra.Junk)
 	out.Opaque = coalesceBool(out.Opaque, extra.Opaque)
+	out.Tamper = coalesceBool(out.Tamper, extra.Tamper)
+	out.AntiDebug = coalesceBool(out.AntiDebug, extra.AntiDebug)
 	return out
 }
 
@@ -184,6 +196,10 @@ func PassEnabled(cfg Config, o PassOverride, pass PassName) bool {
 		return pick(o.Junk, cfg.Junk)
 	case PassOpaque:
 		return pick(o.Opaque, cfg.Opaque)
+	case PassTamper:
+		return pick(o.Tamper, cfg.Tamper)
+	case PassAntiDebug:
+		return pick(o.AntiDebug, cfg.AntiDebug)
 	default:
 		return false
 	}
